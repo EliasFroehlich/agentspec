@@ -1,4 +1,10 @@
 {
+  "name": "agentspec",
+  "description": "Spec-Driven Development framework for Data Engineering",
+  "owner": {
+    "name": "Luan Moreno",
+    "email": "luan.moreno@owshq.com"
+  },
   "plugins": [
     {
       "name": "agentspec",
