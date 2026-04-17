@@ -11,6 +11,9 @@ Thumbs.db
 # Claude Code Local Settings
 .claude/settings.local.json
 
+# AgentSpec session-specific files
+.claude/sdd/.detected-stack.md
+
 # Python
 __pycache__/
 *.py[cod]
