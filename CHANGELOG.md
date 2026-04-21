@@ -4,6 +4,28 @@ All notable changes to AgentSpec will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Agent Router v2 — Phase 1 (Build-Time Generation)** — the `agent-router` skill is now auto-generated from agent frontmatter, eliminating hand-maintained routing tables:
+  - `scripts/generate-agent-router.py` — parses frontmatter across all 58 agents and derives category/tier/model/kb_domains/escalations without any new frontmatter fields required
+  - Generates both `.claude/skills/agent-router/SKILL.md` (human-readable) and `.claude/skills/agent-router/routing.json` (machine-readable, foundation for future semantic layer)
+  - `--check` mode for CI: fails with a unified diff if on-disk output drifts from generated content
+  - Content hash stamped in SKILL.md (currently `d2970b1b988f`) for drift detection
+  - `DO NOT EDIT` header pointing contributors back to the script
+- `scripts/` directory at repo root for build tooling (distinct from `plugin-extras/scripts/` which ships in the plugin)
+
+### Changed
+
+- `build-plugin.sh` gained **Step 0** — runs the agent-router generator before copying artifacts into `plugin/`, ensuring the plugin ships the current routing tables
+- `CLAUDE.md` repository tree updated to reflect the new `scripts/` directory
+- `tasks/backlog.md` marks Agent Router v2 Phase 1 as 🟢 shipped and tracks Phases 2-4 as future work
+
+### Philosophy
+
+Adding, renaming, or retiring an agent no longer requires editing the router. Edit the agent's frontmatter → run `./build-plugin.sh` (or the generator standalone) → routing updates itself.
+
 ## [3.1.0] - 2026-04-17
 
 ### Added

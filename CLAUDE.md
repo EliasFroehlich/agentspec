@@ -93,7 +93,9 @@ agentspec/
 │   ├── hooks/               # hooks.json
 │   └── scripts/             # init-workspace.sh
 │
-├── build-plugin.sh          # Builds plugin/ from .claude/
+├── build-plugin.sh          # Builds plugin/ from .claude/ (invokes scripts/generate-agent-router.py)
+├── scripts/
+│   └── generate-agent-router.py  # Regenerates agent-router SKILL.md + routing.json from agent frontmatter
 ├── CHANGELOG.md             # Version history
 ├── CONTRIBUTING.md          # Contribution guide
 ├── SECURITY.md              # Security policy

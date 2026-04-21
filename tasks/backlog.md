@@ -42,6 +42,25 @@
 
 ## v3.2 — Medium Complexity (Next Release)
 
+### 🟢 P1: Agent Router v2 — Phase 1 (Build-Time Generation)
+
+**Description:** Replaced hand-maintained `agent-router` SKILL.md with build-time generation from agent frontmatter. Zero manual maintenance when agents are added, renamed, or retired — a single `python3 scripts/generate-agent-router.py` regenerates the routing tables.
+
+**Shipped:**
+- [x] `scripts/generate-agent-router.py` — parses frontmatter across all 58 agents, derives category/tier/model/kb_domains/escalations
+- [x] Outputs `SKILL.md` (human-readable routing tables by category, KB domain reverse index, one-liners) + `routing.json` (machine-readable lookup for future semantic layer)
+- [x] `--check` mode for CI: fails if on-disk files drift from generated output
+- [x] Wired into `build-plugin.sh` as Step 0 (runs before plugin copy)
+- [x] `DO NOT EDIT` header on generated SKILL.md pointing to the script
+- [x] Content hash stamped into the file for drift detection
+
+**Next phases (separate backlog items below):**
+- Phase 2: Context-aware signals (branch, stack, session history) — v3.2
+- Phase 3: Feedback loop via Memory Echo — v3.3
+- Phase 4: Semantic index with `router.match` MCP tool — v3.3
+
+---
+
 ### 🔵 P1: Judge Layer via OpenRouter
 
 **Description:** Cross-model verification — use OpenRouter (GPT, Gemini) to validate agent output against Claude's output. Detects hallucinations and bias that single-model judges miss.

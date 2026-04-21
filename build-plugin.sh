@@ -68,6 +68,22 @@ fi
 
 info "Building AgentSpec plugin from .claude/ ..."
 
+# ─── Step 0: Regenerate agent-router from agent frontmatter ──────────────────
+# Ensures .claude/skills/agent-router/SKILL.md and routing.json reflect the
+# current agent set before we copy them into the plugin.
+
+if [[ -f "${SCRIPT_DIR}/scripts/generate-agent-router.py" ]]; then
+    info "Regenerating agent-router from agent frontmatter..."
+    if python3 "${SCRIPT_DIR}/scripts/generate-agent-router.py" >/dev/null; then
+        ok "agent-router regenerated"
+    else
+        error "agent-router generation failed"
+        exit 1
+    fi
+else
+    warn "scripts/generate-agent-router.py not found — skipping regeneration"
+fi
+
 # ─── Step 1: Clean previous build (preserve .claude-plugin/) ─────────────────
 
 info "Cleaning previous build..."
