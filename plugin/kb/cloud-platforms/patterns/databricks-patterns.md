@@ -1,214 +1,194 @@
 # Databricks Implementation Patterns
 
-> **Purpose:** Production patterns for DLT with expectations, Jobs API workflows, Unity Catalog setup, and MLflow model registry
-> **Confidence:** 0.90
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Production patterns for Lakeflow pipelines with expectations and AUTO CDC, Lakeflow Jobs on serverless (and classic compute with access modes), Unity Catalog setup with volumes and liquid clustering, and MLflow 3 on Unity Catalog
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
-## Overview
+## When to Use
 
-Databricks patterns for production data engineering: Delta Live Tables (Declarative Pipelines) with data quality expectations, Jobs API for orchestrated multi-task workflows, Unity Catalog namespace and permissions setup, and MLflow 3 for experiment tracking and model registry.
+- Medallion pipelines with declarative data quality gates and SCD handling
+- Multi-task orchestration where most tasks can run on serverless compute
+- Bootstrapping catalogs, schemas, volumes and grants for a new domain
+- Registering models with governance in Unity Catalog
 
-## The Pattern
+## Implementation
 
-### DLT with Expectations (Data Quality Gates)
+### Lakeflow pipeline: expectations + AUTO CDC (Python)
 
 ```python
-import dlt
-from pyspark.sql.functions import col, expr, current_timestamp, sha2, concat_ws
+from pyspark import pipelines as dp
+from pyspark.sql import functions as F
 
-# Bronze: raw ingestion with schema inference
-@dlt.table(
-    name="customers_bronze",
-    comment="Raw customer data from landing zone",
-    table_properties={"quality": "bronze"}
-)
-def customers_bronze():
-    return (
-        spark.readStream
-        .format("cloudFiles")
-        .option("cloudFiles.format", "json")
-        .option("cloudFiles.inferColumnTypes", "true")
-        .option("cloudFiles.schemaLocation", "/mnt/checkpoints/customers_schema")
-        .load("/mnt/landing/customers/")
-    )
+@dp.table(comment="Raw customer CDC feed", table_properties={"quality": "bronze"})
+def customers_cdc_bronze():
+    return (spark.readStream.format("cloudFiles")
+            .option("cloudFiles.format", "json")
+            .option("cloudFiles.inferColumnTypes", "true")
+            .load("/Volumes/main/raw/landing/customers/"))
 
-# Silver: cleaned with expectations
-@dlt.table(
-    name="customers_silver",
-    comment="Validated customers with surrogate keys",
-    table_properties={"quality": "silver"}
-)
-@dlt.expect_or_drop("valid_email", "email RLIKE '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'")
-@dlt.expect_or_fail("not_null_id", "customer_id IS NOT NULL")
-@dlt.expect("has_name", "first_name IS NOT NULL AND last_name IS NOT NULL")
-def customers_silver():
-    return (
-        dlt.read_stream("customers_bronze")
-        .withColumn("customer_sk", sha2(concat_ws("||", col("customer_id"), col("email")), 256))
-        .withColumn("processed_at", current_timestamp())
-        .dropDuplicates(["customer_id"])
-    )
+@dp.table(comment="Validated CDC events", cluster_by_auto=True)
+@dp.expect_or_drop("valid_email", "email RLIKE '^[^@]+@[^@]+\\.[a-z]{2,}$'")
+@dp.expect_or_fail("not_null_id", "customer_id IS NOT NULL")
+@dp.expect("has_name", "first_name IS NOT NULL")
+def customers_cdc_clean():
+    return (spark.readStream.table("customers_cdc_bronze")
+            .withColumn("processed_at", F.current_timestamp()))
 
-# Gold: business aggregation
-@dlt.table(
-    name="customer_lifetime_value",
-    comment="CLV metrics per customer",
-    table_properties={"quality": "gold"}
+# SCD Type 2 target maintained by an AUTO CDC flow (replaces apply_changes)
+dp.create_streaming_table("customers_scd2", comment="Customer history")
+dp.create_auto_cdc_flow(
+    target="customers_scd2",
+    source="customers_cdc_clean",
+    keys=["customer_id"],
+    sequence_by=F.col("event_ts"),
+    apply_as_deletes=F.expr("op = 'DELETE'"),
+    except_column_list=["op"],
+    stored_as_scd_type="2",            # current row: __END_AT IS NULL
 )
-def customer_lifetime_value():
-    customers = dlt.read("customers_silver")
-    orders = dlt.read("orders_silver")
-    return (
-        orders.groupBy("customer_id")
-        .agg(
-            expr("SUM(order_amount) AS total_spend"),
-            expr("COUNT(*) AS order_count"),
-            expr("DATEDIFF(MAX(order_date), MIN(order_date)) AS customer_tenure_days")
-        )
-        .join(customers, "customer_id", "inner")
-    )
+
+@dp.materialized_view(comment="Active customers per country")
+def customers_by_country():
+    return (spark.read.table("customers_scd2")
+            .where(F.col("__END_AT").isNull())
+            .groupBy("country").count())
 ```
 
-### Jobs API Workflow (Multi-Task Orchestration)
+### Lakeflow Jobs: serverless first, classic only where needed
+
+For production, define jobs and pipelines in **Declarative Automation Bundles** YAML (same shape as the Jobs API);
+see [lakeflow-jobs](../../lakeflow/reference/lakeflow-jobs.md) and [bundles-cli](../../lakeflow/reference/bundles-cli.md).
 
 ```python
-# Databricks Jobs API -- multi-task workflow definition (JSON payload)
+# Jobs API create payload. Tasks without a cluster spec run on serverless compute.
 job_config = {
-    "name": "daily_pipeline_v2",
+    "name": "daily_orders",
+    "performance_target": "STANDARD",          # or PERFORMANCE_OPTIMIZED (serverless tasks only)
+    "environments": [{
+        "environment_key": "default",
+        "spec": {"environment_version": "6", "dependencies": ["requests==2.32.3"]},
+    }],
     "tasks": [
-        {
-            "task_key": "ingest_raw",
-            "pipeline_task": {
-                "pipeline_id": "abc-123-dlt-pipeline"
-            }
-        },
-        {
-            "task_key": "run_dbt_models",
-            "depends_on": [{"task_key": "ingest_raw"}],
-            "dbt_task": {
-                "project_directory": "/Workspace/dbt_project",
-                "commands": ["dbt run --select tag:daily"],
-                "warehouse_id": "xyz-789-sql-warehouse"
-            }
-        },
-        {
-            "task_key": "quality_checks",
-            "depends_on": [{"task_key": "run_dbt_models"}],
-            "notebook_task": {
-                "notebook_path": "/Repos/pipelines/quality_checks",
-                "base_parameters": {"date": "{{job.start_date.iso}}"}
-            },
-            "new_cluster": {
-                "spark_version": "15.4.x-scala2.12",
-                "num_workers": 2,
-                "node_type_id": "i3.xlarge"
-            }
-        },
-        {
-            "task_key": "train_model",
-            "depends_on": [{"task_key": "quality_checks"}],
-            "notebook_task": {
-                "notebook_path": "/Repos/ml/train_churn_model"
-            },
-            "job_cluster_key": "ml_cluster"
-        }
+        {"task_key": "ingest",
+         "pipeline_task": {"pipeline_id": "<pipeline-id>"}},
+        {"task_key": "transform", "depends_on": [{"task_key": "ingest"}],
+         "spark_python_task": {"python_file": "/Workspace/Shared/etl/transform.py",
+                               "parameters": ["--run-date", "{{job.start_time.iso_date}}"]},
+         "environment_key": "default"},     # required for Python tasks on serverless
+        {"task_key": "quality_checks", "depends_on": [{"task_key": "transform"}],
+         "notebook_task": {"notebook_path": "/Workspace/Shared/etl/quality_checks"}},
+        {"task_key": "legacy_jar", "depends_on": [{"task_key": "quality_checks"}],
+         "spark_jar_task": {"main_class_name": "com.example.Export"},
+         "libraries": [{"jar": "/Volumes/main/libs/jars/export.jar"}],
+         "job_cluster_key": "classic"},
     ],
     "job_clusters": [{
-        "job_cluster_key": "ml_cluster",
+        "job_cluster_key": "classic",
         "new_cluster": {
-            "spark_version": "15.4.x-ml-scala2.12",
-            "num_workers": 4,
-            "node_type_id": "g5.2xlarge"
-        }
+            "spark_version": "17.3.x-scala2.13",          # DBR 17.3 LTS (Spark 4.0); 18 LTS also available
+            "data_security_mode": "DATA_SECURITY_MODE_DEDICATED",  # or ..._STANDARD; SINGLE_USER/USER_ISOLATION are legacy aliases
+            "node_type_id": "i3.xlarge",
+            "autoscale": {"min_workers": 1, "max_workers": 4},
+        },
     }],
-    "schedule": {"quartz_cron_expression": "0 0 6 * * ?", "timezone_id": "UTC"}
+    "schedule": {"quartz_cron_expression": "0 0 6 * * ?", "timezone_id": "UTC"},
 }
 ```
 
-### Unity Catalog Namespace Setup
+### Unity Catalog bootstrap
 
 ```sql
--- Create catalog for production environment
-CREATE CATALOG IF NOT EXISTS prod_catalog
-  COMMENT 'Production data catalog';
+CREATE CATALOG IF NOT EXISTS main COMMENT 'Production catalog';
+CREATE SCHEMA IF NOT EXISTS main.raw;
+CREATE SCHEMA IF NOT EXISTS main.curated;
+CREATE SCHEMA IF NOT EXISTS main.analytics;
 
--- Create schemas (databases) within catalog
-CREATE SCHEMA IF NOT EXISTS prod_catalog.raw
-  COMMENT 'Raw ingested data';
-CREATE SCHEMA IF NOT EXISTS prod_catalog.curated
-  COMMENT 'Cleaned and validated data';
-CREATE SCHEMA IF NOT EXISTS prod_catalog.analytics
-  COMMENT 'Business-ready aggregations';
+-- Landing files live in a governed volume, not a DBFS mount
+CREATE EXTERNAL LOCATION IF NOT EXISTS landing_s3
+  URL 's3://my-bucket/landing/'
+  WITH (STORAGE CREDENTIAL my_storage_credential);
+CREATE EXTERNAL VOLUME IF NOT EXISTS main.raw.landing
+  LOCATION 's3://my-bucket/landing/files/';   -- inside the location, not overlapping tables
 
--- Grant access by role
-GRANT USE CATALOG ON CATALOG prod_catalog TO `data-engineers`;
-GRANT USE SCHEMA, SELECT ON SCHEMA prod_catalog.raw TO `data-engineers`;
-GRANT ALL PRIVILEGES ON SCHEMA prod_catalog.curated TO `data-engineers`;
-GRANT USE SCHEMA, SELECT ON SCHEMA prod_catalog.analytics TO `analysts`;
+-- New tables: liquid clustering, let predictive optimization pick keys
+CREATE TABLE IF NOT EXISTS main.curated.orders (
+  order_id STRING, customer_id STRING, order_ts TIMESTAMP, amount DECIMAL(12,2)
+) CLUSTER BY AUTO;
 
--- External location for cloud storage
-CREATE EXTERNAL LOCATION prod_s3_landing
-  URL 's3://company-data-lake/landing/'
-  WITH (STORAGE CREDENTIAL aws_prod_credential);
+GRANT USE CATALOG ON CATALOG main TO `data-engineers`;
+GRANT USE SCHEMA, SELECT ON SCHEMA main.raw TO `data-engineers`;
+GRANT READ VOLUME, WRITE VOLUME ON VOLUME main.raw.landing TO `data-engineers`;
+GRANT USE SCHEMA, SELECT ON SCHEMA main.analytics TO `analysts`;
 ```
 
-### MLflow 3 Model Registry
+### MLflow 3 with the Unity Catalog registry
 
 ```python
 import mlflow
-from mlflow.models import infer_signature
+from mlflow import MlflowClient
+from sklearn.ensemble import RandomForestClassifier
 
-# Set Unity Catalog as the model registry
-mlflow.set_registry_uri("databricks-uc")
-
-with mlflow.start_run(run_name="churn_model_v3") as run:
-    # Train model
-    model = train_xgboost_model(X_train, y_train)
-    signature = infer_signature(X_train, model.predict(X_train))
-
-    # Log model to Unity Catalog
+# MLflow 3 defaults to the "databricks-uc" registry on Databricks.
+with mlflow.start_run():
+    clf = RandomForestClassifier(max_depth=7).fit(X_train, y_train)
     mlflow.sklearn.log_model(
-        model,
-        artifact_path="model",
-        registered_model_name="prod_catalog.ml_models.churn_predictor",
-        signature=signature
+        sk_model=clf,
+        name="model",                                   # MLflow 3 (artifact_path in 2.x)
+        input_example=X_train.iloc[[0]],                # signature inferred
+        registered_model_name="main.ml.churn_model",    # three-level UC name
     )
-    mlflow.log_metrics({"auc": 0.89, "f1": 0.82, "precision": 0.85})
 
-# Promote to production alias
-client = mlflow.tracking.MlflowClient()
-client.set_registered_model_alias(
-    name="prod_catalog.ml_models.churn_predictor",
-    alias="production",
-    version=3
-)
+MlflowClient().set_registered_model_alias("main.ml.churn_model", "champion", version=1)
 ```
 
-## Quick Reference
+## Configuration
 
-| Pattern | Use When | Key Detail |
-|---------|----------|------------|
-| DLT expectations | Data quality gates in pipelines | `expect_or_drop` / `expect_or_fail` |
-| Jobs API workflow | Multi-task orchestration | Task dependencies + mixed task types |
-| Unity Catalog | Governance and access control | `catalog.schema.table` namespace |
-| MLflow 3 | Model versioning and deployment | UC-backed model registry |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Pipeline compute | serverless (new pipelines) | Requires UC; classic pipelines still supported |
+| Job task compute | serverless for supported task types | Notebook, Python script, wheel, dbt, JAR |
+| `performance_target` | `STANDARD` start-up of 4–6 min | `PERFORMANCE_OPTIMIZED` starts faster, same SKU, more DBUs |
+| `data_security_mode` | set explicitly (`..._AUTO` lets Databricks choose) | `..._DEDICATED` (single user/group) or `..._STANDARD` (shared, Spark Connect) |
+| Serverless `environment_version` | `6` is current (2026-09-03) | Pins the client API (Spark Connect, Python 3.12) for serverless Python |
 
-## Common Mistakes
+## Example Usage
 
 ### Wrong
+
 ```python
-# Registering models to legacy workspace registry
-mlflow.set_registry_uri("databricks")
+# Not serverless: legacy High-Concurrency profile, rejected together with access modes
+new_cluster = {"spark_conf": {"spark.databricks.cluster.profile": "serverless"}}
+# Legacy module and deprecated mounts
+import dlt
+@dlt.table
+def t(): return spark.readStream.format("cloudFiles").load("/mnt/landing/")
 ```
 
 ### Correct
+
 ```python
-# Using Unity Catalog model registry for governance
-mlflow.set_registry_uri("databricks-uc")
+# Serverless = omit new_cluster/job_cluster_key/existing_cluster_id on supported tasks
+{"task_key": "t", "notebook_task": {"notebook_path": "/Workspace/Shared/etl/t"}}
 ```
 
-## Related
+## See Also
 
-- [Databricks LakeFlow](../concepts/databricks-lakeflow.md) -- Platform concepts and LakeFlow Connect
-- [Cross-Platform Patterns](../concepts/cross-platform-patterns.md) -- SQL dialect portability
-- [Cost Optimization](cost-optimization.md) -- DBU management and cluster sizing
+- [Databricks Lakeflow](../concepts/databricks-lakeflow.md) — platform map and current versions
+- [Cost Optimization](cost-optimization.md) — DBU levers and billing system tables
+- [Lakeflow KB](../../lakeflow/index.md) — pipelines in depth (authoritative for `pyspark.pipelines` and AUTO CDC)
+- [Lakeflow Jobs reference](../../lakeflow/reference/lakeflow-jobs.md) and [Bundles CLI](../../lakeflow/reference/bundles-cli.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/developer/python-ref
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes
+- https://docs.databricks.com/aws/en/ldp/expectations
+- https://docs.databricks.com/aws/en/jobs/run-serverless-jobs
+- https://docs.databricks.com/api/workspace/jobs/create
+- https://docs.databricks.com/aws/en/jobs/dynamic-value-references
+- https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/
+- https://docs.databricks.com/aws/en/release-notes/runtime/
+- https://docs.databricks.com/aws/en/dbfs/unity-catalog
+- https://docs.databricks.com/aws/en/delta/clustering
+- https://docs.databricks.com/aws/en/machine-learning/manage-model-lifecycle/
+- https://registry.terraform.io/providers/databricks/databricks/latest/docs/resources/cluster
+- https://kb.databricks.com/clusters/cannot-create-cluster-spark-conf-sparkdatabricksclusterprofile-is-not-allowed-when-choosing-an-access-mode

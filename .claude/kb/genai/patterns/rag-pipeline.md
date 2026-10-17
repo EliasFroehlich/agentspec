@@ -1,7 +1,7 @@
 # RAG Pipeline Pattern
 
 > **Purpose**: End-to-end RAG implementation with hybrid search, reranking, context engineering, and evaluation
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -123,24 +123,54 @@ Answer:"""
 | `chunk_overlap` | `50` | Overlap between chunks |
 | `top_k` | `20` | Candidates from initial retrieval |
 | `rerank_top_n` | `5` | Final chunks after reranking |
-| `embedding_model` | `text-embedding-3-large` | OpenAI embedding model (Matryoshka-capable) |
+| `embedding_model` | `text-embedding-3-large` | Any current embedding model; see [embedding pipelines](../../ai-data-engineering/concepts/embedding-pipelines.md) |
 
 ## Example Usage
 
 ```python
 pipeline = ProductionRAGPipeline(
-    vector_store=PineconeStore(index="knowledge-base"),
-    embedding_model=OpenAIEmbeddings(model="text-embedding-3-large"),
-    reranker=CohereReranker(model="rerank-v3.5"),
-    llm=ChatAnthropic(model="claude-sonnet-4-6"),
+    vector_store=MyVectorStore(index="knowledge-base"),       # adapter over your vector DB
+    embedding_model=MyEmbedder(model="text-embedding-3-large"),  # adapter with embed / embed_batch
+    reranker=MyReranker(model="rerank-v4.0-pro"),   # Cohere; rerank-v4.0-fast for lower latency
+    llm=MyLLM(model="claude-sonnet-5-5"),           # adapter exposing generate(prompt)
 )
 docs = [Document(content=text, metadata={"source": "manual.pdf"}) for text in texts]
 pipeline.ingest(docs)
-response = pipeline.retrieve_and_generate("How do I reset my password?")
+question = "How do I reset my password?"
+response = pipeline.generate(question, pipeline.retrieve(question))
 ```
+
+## Variant: Databricks AI Search (managed hybrid retrieval)
+
+When documents live in a lakehouse, let AI Search (formerly Vector Search) own embedding, sync, and hybrid scoring:
+
+```python
+from databricks.sdk import WorkspaceClient
+
+w = WorkspaceClient()
+hits = w.vector_search_indexes.query_index(
+    index_name="main.docs.chunks_index",            # Delta Sync index over a chunk table
+    columns=["chunk_id", "chunk_to_retrieve", "source_path"],
+    query_text="How do I reset my password?",
+    query_type="HYBRID",                              # ANN + BM25 keyword scoring
+    num_results=5,
+)
+chunks = [row[1] for row in hits.result.data_array]  # last column is the score
+```
+
+SQL equivalent: `SELECT * FROM vector_search(index => 'main.docs.chunks_index', query_text => '...',
+query_type => 'HYBRID', num_results => 5)`. Build the chunk table with `ai_parse_document` + `ai_prep_search`; see
+[Databricks-native RAG](../../ai-data-engineering/patterns/databricks-native-rag.md).
 
 ## See Also
 
 - [RAG Architecture](../concepts/rag-architecture.md)
 - [Evaluation Framework](../patterns/evaluation-framework.md)
 - [Guardrails](../concepts/guardrails.md)
+
+## Sources
+
+- https://docs.cohere.com/docs/rerank
+- https://platform.claude.com/docs/en/about-claude/pricing
+- https://docs.databricks.com/aws/en/ai-search/ai-search/
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/vector_search

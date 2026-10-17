@@ -1,168 +1,120 @@
 # Gold Layer
 
-> **Purpose**: Business-level aggregation layer -- star schemas, KPIs, materialized views for consumption
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Business layer — dimensional models and aggregates per domain, materialized views, DDL-owned schemas, semantic layer on top
+> **Confidence**: 0.92
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-The Gold layer contains business-ready data optimized for consumption by dashboards,
-reports, ML models, and APIs. It organizes Silver data into dimensional models (star/snowflake
-schemas), pre-computes aggregations and KPIs, and provides domain-specific views. Gold tables
-are the final presentation layer of the Medallion Architecture.
+Gold holds refined, business-aligned data for dashboards, ML and applications. Per the Databricks medallion guidance, this is where you **model dimensionally** (facts, dimensions, measures) and **aggregate**; because Gold models a business domain, several Gold layers (finance, HR, ...) are normal. Pre-aggregations are typically **materialized views** with incremental refresh. Gold tables are queried constantly, so their layout matters (`CLUSTER BY AUTO`) and their schema is a contract: change it explicitly (DDL), never implicitly from a DataFrame. Governed business metrics go one step further into Unity Catalog metric views — see [metric views](../../metric-views/index.md).
 
 ## The Pattern
 
+```sql
+-- 1. Aggregate as a materialized view (Pro/serverless SQL warehouse or a pipeline)
+CREATE OR REPLACE MATERIALIZED VIEW main.gold.agg_monthly_revenue
+CLUSTER BY AUTO
+SCHEDULE EVERY 1 HOUR
+AS SELECT date_trunc('month', o.order_ts) AS order_month,
+          c.customer_segment, c.region,
+          SUM(o.amount)                 AS total_revenue,
+          COUNT(DISTINCT o.customer_id) AS unique_customers,
+          COUNT(o.order_id)             AS total_orders
+   FROM main.silver.orders o
+   JOIN main.silver.customers c USING (customer_id)
+   GROUP BY ALL;
+
+-- 2. Fact table whose schema is owned by DDL; loads never change the schema
+CREATE TABLE IF NOT EXISTS main.gold.fact_orders (
+  order_id     STRING NOT NULL,
+  customer_sk  BIGINT NOT NULL,
+  date_sk      INT    NOT NULL,
+  quantity     INT,
+  net_amount   DECIMAL(12,2),
+  _computed_at TIMESTAMP,
+  CONSTRAINT fact_orders_pk PRIMARY KEY (order_id) RELY   -- informational, not enforced
+) CLUSTER BY AUTO;
+
+INSERT INTO main.gold.fact_orders
+REPLACE WHERE date_sk >= 20261001                -- atomic slice refresh (DBR 12.2 LTS+)
+SELECT order_id, customer_sk, date_sk, quantity, net_amount, current_timestamp()
+FROM main.silver.orders_enriched WHERE date_sk >= 20261001;
+```
+
 ```python
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, sum as _sum, count, avg, max as _max,
-    current_timestamp, date_trunc
-)
-
-spark = SparkSession.builder.getOrCreate()
-
-def build_gold_aggregation(silver_orders: str, silver_customers: str, gold_table: str):
-    """Build Gold-layer business aggregation from Silver tables."""
-    orders = spark.table(silver_orders)
-    customers = spark.table(silver_customers)
-
-    gold_df = (
-        orders
-        .join(customers, "customer_id", "inner")
-        .groupBy(
-            date_trunc("month", col("order_date")).alias("order_month"),
-            col("customer_segment"),
-            col("region")
-        )
-        .agg(
-            _sum("amount").alias("total_revenue"),
-            count("order_id").alias("total_orders"),
-            avg("amount").alias("avg_order_value"),
-            _max("order_date").alias("last_order_date")
-        )
-        .withColumn("_computed_at", current_timestamp())
-    )
-
-    (
-        gold_df.write
-        .format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(gold_table)
-    )
-    return gold_df
+# PySpark full refresh of a DDL-created table: plain overwrite keeps the table's schema;
+# a DataFrame that does not match it fails instead of silently changing the contract.
+gold_df.write.mode("overwrite").saveAsTable("main.gold.agg_customer_revenue")
 ```
 
 ## Quick Reference
 
 | Property | Value | Notes |
-|----------|-------|-------|
-| Write mode | `overwrite` or `merge` | Depends on aggregation type |
-| Schema | Star / snowflake | `dim_*` and `fact_*` tables |
-| Naming | `dim_{entity}`, `fact_{entity}`, `agg_{metric}` | Business-oriented names |
-| Partitioning | By business dimension | Region, date, segment |
-| Optimization | Z-ORDER on query columns | Align with common filters |
-| Refresh | Scheduled batch | Daily, hourly, or triggered |
+|---|---|---|
+| Content | Dimensional model + aggregates per business domain | Several Gold layers allowed |
+| Aggregates | Materialized views (`CREATE OR REPLACE MATERIALIZED VIEW`) | Incremental refresh; expectations allowed |
+| Tables | `CREATE TABLE` once, then `MERGE` / `INSERT ... REPLACE WHERE / USING` / plain overwrite | Schema changes via `ALTER TABLE` |
+| Layout | `CLUSTER BY AUTO` (UC managed) or `CLUSTER BY (date_sk, customer_sk)` | ZORDER/partitioning are legacy here |
+| Keys | PK/FK constraints are informational; `RELY` lets Photon ([photon](../../spark/concepts/photon.md)) use them for rewrites | NOT NULL and CHECK are enforced |
+| Refresh tracking | `_computed_at` column, or `DESCRIBE HISTORY` / MV refresh history | — |
+| Semantic layer | Unity Catalog metric views over Gold | [../../metric-views/index.md](../../metric-views/index.md) |
 
-## Dimensional Model Example
-
-```sql
--- Dimension: Customers
-CREATE OR REPLACE TABLE gold.dim_customers AS
-SELECT
-    customer_id,
-    customer_name,
-    email,
-    customer_segment,
-    region,
-    first_order_date,
-    lifetime_order_count,
-    lifetime_revenue,
-    current_timestamp() AS _computed_at
-FROM silver.cleansed_customers;
-
--- Fact: Orders
-CREATE OR REPLACE TABLE gold.fact_orders AS
-SELECT
-    o.order_id,
-    o.customer_id,
-    o.product_id,
-    o.order_date,
-    o.quantity,
-    o.unit_price,
-    o.quantity * o.unit_price AS total_amount,
-    o.discount_pct,
-    o.shipping_cost,
-    current_timestamp() AS _computed_at
-FROM silver.cleansed_orders o;
-
--- Aggregate: Monthly Revenue KPI
-CREATE OR REPLACE TABLE gold.agg_monthly_revenue AS
-SELECT
-    DATE_TRUNC('month', order_date) AS order_month,
-    region,
-    customer_segment,
-    SUM(total_amount) AS total_revenue,
-    COUNT(DISTINCT customer_id) AS unique_customers,
-    COUNT(order_id) AS total_orders,
-    AVG(total_amount) AS avg_order_value,
-    current_timestamp() AS _computed_at
-FROM gold.fact_orders f
-JOIN gold.dim_customers c USING (customer_id)
-GROUP BY 1, 2, 3;
-```
+| Replace option | Effect (Databricks docs) |
+|---|---|
+| `CREATE OR REPLACE TABLE` | Keeps history, grants, row filters, column masks; the new definition replaces the schema; restate `CLUSTER BY AUTO`; cannot toggle catalog commits |
+| `DROP TABLE` + `CREATE TABLE` | Loses history and grants; Databricks recommends `REPLACE` instead |
+| `.option("overwriteSchema", "true")` | Avoid — see below |
 
 ## Common Mistakes
 
-### Wrong -- Aggregating from Bronze
+### Wrong
 
 ```python
-# Never skip Silver; you get duplicates and dirty data
-bronze_df = spark.table("bronze.raw_orders")
-gold_agg = bronze_df.groupBy("region").agg(_sum("amount"))
+# overwriteSchema replaces the table schema and partitioning under every consumer in one
+# commit: dashboards and views break silently, streaming readers fail on the schema change,
+# and comments on columns the DataFrame recomputed are lost.
+(gold_df.write.format("delta").mode("overwrite")
+    .option("overwriteSchema", "true").saveAsTable("main.gold.agg_revenue"))
+
+bronze_df.groupBy("region").agg(sum("amount"))   # aggregating Bronze: duplicates, dirty data
 ```
 
-### Correct -- Aggregate from Silver
+### Correct
 
-```python
-# Always source from cleansed Silver
-silver_df = spark.table("silver.cleansed_orders")
-gold_agg = silver_df.groupBy("region").agg(_sum("amount").alias("total_revenue"))
+```sql
+ALTER TABLE main.gold.agg_revenue ADD COLUMN channel STRING;   -- explicit, reviewable change
+-- then write with a DataFrame matching the new schema (plain overwrite, MERGE or REPLACE WHERE)
 ```
 
-## Gold Layer Anti-Patterns
+## Gold for ML
 
-| Anti-Pattern | Problem | Solution |
-|-------------|---------|----------|
-| One massive Gold table | Slow queries, hard to maintain | Purpose-specific aggregates |
-| No `_computed_at` column | Cannot tell when data was refreshed | Always add computation timestamp |
-| Raw IDs without dimensions | Users must join manually | Pre-join dimensions into facts |
-| No Z-ORDER / liquid clustering | Full scans on filtered queries | Use liquid clustering (Delta 4.x) or Z-ORDER |
-| Gold tables business users can't use | Poorly named, no documentation | Business-friendly names + semantic layer |
-| No certification/trust markers | Users unsure which tables are reliable | Tag certified Gold tables, add data contracts |
-| Ignoring AI/ML consumption | ML models get inconsistent data | Serve certified Gold to feature stores and vector DBs |
+Publish certified Gold features with Feature Engineering in Unity Catalog: `FeatureEngineeringClient().create_table(name=..., primary_keys=[...], timeseries_columns="event_ts", df=...)`, then `fe.write_table(name=..., df=..., mode="merge")`. Point-in-time joins require the timestamp key to be declared in `timeseries_columns`.
 
-## Gold for AI/ML (2025+ Pattern)
+## Anti-Patterns
 
-```python
-# Gold -> Feature Store: serve certified data for ML training
-def publish_to_feature_store(gold_table: str, feature_group: str, entity_key: str):
-    """Publish Gold layer data as ML features with point-in-time correctness."""
-    gold_df = spark.table(gold_table)
-
-    # Feature store expects: entity_key + timestamp + feature columns
-    features = (
-        gold_df
-        .withColumn("event_timestamp", col("_computed_at"))
-        .select(entity_key, "event_timestamp", *feature_columns)
-    )
-    # Write to feature store (Feast, Databricks Feature Store, etc.)
-    fs.write_table(name=feature_group, df=features, mode="merge")
-```
+| Anti-pattern | Fix |
+|---|---|
+| One massive Gold table for everything | Purpose-specific facts, dims and MVs per domain |
+| Nightly `OPTIMIZE ... ZORDER` jobs | `CLUSTER BY AUTO` + predictive optimization |
+| Metrics re-implemented in every dashboard | Define them once in a metric view |
+| Uncertified tables consumed by AI/BI and agents | Tag certified Gold tables; add comments and constraints |
 
 ## Related
 
-- [Silver Layer](../concepts/silver-layer.md)
+- [Silver Layer](silver-layer.md)
 - [Layer Transitions](../patterns/layer-transitions.md)
-- [Domain Modeling](../concepts/domain-modeling.md)
+- [Domain Modeling](domain-modeling.md)
+- [Star schema](../../data-modeling/patterns/star-schema.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/lakehouse/medallion
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-materialized-view
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-dml-insert-into
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-constraint
+- https://docs.databricks.com/aws/en/tables/update-schema
+- https://docs.databricks.com/aws/en/structured-streaming/delta-lake
+- https://docs.databricks.com/aws/en/tables/clustering
+- https://docs.databricks.com/aws/en/machine-learning/feature-store/uc/feature-tables-uc
+- https://docs.databricks.com/aws/en/machine-learning/feature-store/time-series

@@ -1,54 +1,79 @@
 # Real-Time Mode
 
-> **Purpose**: Spark Structured Streaming Real-Time Mode — sub-5ms latency, watermarks, output modes
+> **Purpose**: Structured Streaming trigger modes — micro-batch, AvailableNow, and real-time mode (Databricks DBR 16.4 LTS+, OSS Spark 4.1+) with its real prerequisites; watermarks and output modes
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Spark Structured Streaming processes data as micro-batches or (on Databricks 2026+) in **Real-Time Mode** with ~5ms latency. The programming model is identical to batch — the same DataFrame API — but with continuous input sources (Kafka, Delta, Kinesis) and output sinks. Watermarks handle late-arriving data by defining how long to wait before finalizing windows.
+Structured Streaming uses the DataFrame API over unbounded inputs. The **trigger** decides how data
+is processed: micro-batches (default), `availableNow` (process what exists, then stop) or
+**real-time mode**, a trigger type for sub-second operational workloads (Databricks documents
+end-to-end latency "as low as five milliseconds"). Real-time mode is not automatic: it is an explicit
+trigger with strict compute and query requirements. Watermarks bound state for event-time
+aggregations in every mode.
+
+| Engine | Real-time mode availability |
+|--------|-----------------------------|
+| Databricks Structured Streaming | DBR 16.4 LTS+ (so 17.3 LTS, 18 LTS, 19) on classic compute; serverless compute not supported; stream-stream joins with other streams on the same cluster need DBR 18 LTS+ |
+| Databricks Lakeflow pipelines (classic or serverless) | Not via Structured Streaming triggers, but via pipeline configuration: continuous mode + `spark.databricks.streaming.realTimeMode.enabled` in the pipeline `spark_conf` + an update flow with `pipelines.trigger = "RealTime"` (Public Preview, DBR 18.1.3 preview channel) |
+| Apache Spark | 4.1.0 (Scala, stateless queries); PySpark `trigger(realTime=...)` in 4.2.0 |
 
 ## The Concept
 
 ```python
-from pyspark.sql import functions as F
+# Databricks real-time mode — compute prerequisites (setup page), set on the CLUSTER, not in the notebook:
+#   classic compute (dedicated, or standard for Python only; serverless compute not supported)
+#   autoscaling OFF, Photon OFF, spot instances OFF
+#   cluster Spark config: spark.databricks.streaming.realTimeMode.enabled true
 
-# Read from Kafka as a streaming DataFrame
-orders_stream = (
-    spark.readStream
+query = (spark.readStream
     .format("kafka")
-    .option("kafka.bootstrap.servers", "broker:9092")
+    .option("kafka.bootstrap.servers", broker)
     .option("subscribe", "orders")
-    .option("startingOffsets", "latest")
     .load()
-    .select(
-        F.from_json(F.col("value").cast("string"), order_schema).alias("data")
-    )
-    .select("data.*")
-)
+    .selectExpr("CAST(key AS STRING) AS key", "value")
+    .writeStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", broker)
+    .option("topic", "orders_enriched")
+    .option("checkpointLocation", checkpoint_path)
+    .outputMode("update")                 # real-time mode supports update mode only
+    .trigger(realTime="5 minutes")        # PySpark requires the interval (micro-batch/checkpoint length)
+    .start())
+```
 
-# Windowed aggregation with watermark for late data
-revenue_per_minute = (
-    orders_stream
+```python
+# Micro-batch with watermark (any mode) — bounded state for windowed aggregation
+revenue_per_minute = (orders_stream
     .withWatermark("event_time", "10 minutes")
     .groupBy(F.window("event_time", "1 minute"))
-    .agg(F.sum("amount").alias("total_revenue"))
-)
+    .agg(F.sum("amount").alias("total_revenue")))
 ```
 
 ## Quick Reference
 
-| Mode | Latency | Trigger | Use Case |
-|------|---------|---------|----------|
-| Micro-batch (default) | 100ms-seconds | `processingTime="10 seconds"` | Most streaming workloads |
-| AvailableNow | Batch-like | `availableNow=True` | Catch-up processing, backfills |
-| Continuous (experimental) | ~1ms | `continuous="1 second"` | Ultra-low latency, limited ops |
-| Real-Time Mode (DBR 2026) | ~5ms | Automatic | Production low-latency on Databricks |
+| Trigger | Syntax (Python) | Use case |
+|---------|-----------------|----------|
+| Default (unspecified) | — | `processingTime` 0 ms; continuous micro-batches (~seconds latency); watch cloud-storage API costs |
+| Processing time | `.trigger(processingTime="10 seconds")` | Balance cost and latency |
+| Available now | `.trigger(availableNow=True)` | Scheduled incremental batch, backfills |
+| Real-time mode | `.trigger(realTime="5 minutes")` | Sub-second operational workloads (fraud, personalization) |
+| Continuous (OSS, experimental) | `.trigger(continuous="1 second")` | **Not supported on Databricks** — use real-time mode |
 
-| Output Mode | Behavior | Use With |
+| Real-time mode constraint (Databricks) | Detail |
+|----------------------------------------|--------|
+| Output mode | `update` only (no `append`/`complete`) |
+| Sources | Kafka, Event Hubs (Kafka connector), Kinesis (EFO recommended), AWS MSK |
+| Sinks | Kafka, Event Hubs, `foreachWriter`; **Delta is not a source or sink** |
+| Windows | Tumbling and sliding supported; session windows not supported |
+| Arbitrary state | Row-based `transformWithState` only (`transformWithStateInPandas` not supported); DBR 17.3 LTS+ |
+| Sizing | Task slots ≥ total tasks across all stages (e.g. 8 Kafka partitions + 20 shuffle partitions = 28 slots) |
+
+| Output mode | Behavior | Use with |
 |-------------|----------|----------|
-| `append` | Only new rows, after watermark | Windowed aggs, non-agg queries |
-| `update` | Changed rows only | Aggregations, stateful ops |
+| `append` | Only finalized rows (after watermark) | Windowed aggs, non-agg queries |
+| `update` | Changed rows only | Aggregations, stateful ops, real-time mode |
 | `complete` | Entire result table | Small aggregations only |
 
 ## Common Mistakes
@@ -56,21 +81,36 @@ revenue_per_minute = (
 ### Wrong
 
 ```python
-# No watermark with windowed aggregation — unbounded state growth
-orders_stream.groupBy(F.window("event_time", "1 minute")).count()
+# Expecting real-time latency from a regular job cluster with Photon + autoscaling,
+# Delta as sink, and no trigger
+(stream.writeStream.format("delta").outputMode("append")
+    .option("checkpointLocation", cp).toTable("main.ops.events"))
 ```
 
 ### Correct
 
 ```python
-# Watermark bounds state: drop data older than 10 min
-(orders_stream
-    .withWatermark("event_time", "10 minutes")
-    .groupBy(F.window("event_time", "1 minute"))
-    .count())
+# Real-time mode: explicit trigger, update mode, supported sink, Photon/autoscaling off on the cluster
+(stream.writeStream.format("kafka").option("kafka.bootstrap.servers", broker)
+    .option("topic", "events_out").option("checkpointLocation", cp)
+    .outputMode("update").trigger(realTime="5 minutes").start())
+# For Delta targets and analytical latency (seconds-minutes), use micro-batch or availableNow.
 ```
 
 ## Related
 
 - [dataframe-api](../concepts/dataframe-api.md)
+- [photon](../concepts/photon.md)
+- [transform-with-state](../patterns/transform-with-state.md)
 - [spark-streaming-patterns](../../streaming/patterns/spark-streaming-patterns.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/structured-streaming/real-time/
+- https://docs.databricks.com/aws/en/structured-streaming/real-time/setup
+- https://docs.databricks.com/aws/en/structured-streaming/real-time/reference
+- https://docs.databricks.com/aws/en/structured-streaming/triggers
+- https://docs.databricks.com/aws/en/ldp/real-time
+- https://docs.databricks.com/aws/en/stateful-applications/
+- https://spark.apache.org/releases/spark-release-4.1.0.html
+- https://spark.apache.org/releases/spark-release-4-2-0.html

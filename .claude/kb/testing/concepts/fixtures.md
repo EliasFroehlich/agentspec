@@ -1,179 +1,146 @@
 # Fixtures
 
-> **Purpose**: pytest fixture patterns, scope control, async fixtures, and dependency injection
+> **Purpose**: pytest fixture patterns -- scope, yield teardown, conftest.py, built-in tmp_path/monkeypatch, async fixtures
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Fixtures are pytest's dependency injection mechanism. A test function declares its dependencies
-by naming fixtures as parameters. pytest resolves them automatically, manages their lifecycle
-via scope, and handles teardown. Fixtures replace traditional setUp/tearDown with composable,
-reusable components defined in `conftest.py` or test modules.
+Fixtures are pytest's dependency injection: a test names a fixture as a parameter, pytest builds it,
+caches it for its **scope**, and runs the code after `yield` as teardown. Fixtures compose (a fixture
+can request other fixtures) and are shared through `conftest.py` files.
 
 ## The Pattern
 
 ```python
 import pytest
-from myapp.db import Database
 
 
 @pytest.fixture
-def sample_invoice():
-    """Function-scoped fixture: fresh data per test."""
-    return {
-        "invoice_number": "INV-001",
-        "vendor_name": "Acme Corp",
-        "total_amount": 1500.00,
-        "currency": "USD",
-    }
+def sample_invoice() -> dict:
+    """Function scope (default): fresh object for every test."""
+    return {"invoice_number": "INV-001", "vendor_name": "Acme Corp", "total_amount": 1500.0}
 
 
 @pytest.fixture(scope="session")
-def db_connection():
-    """Session-scoped: one connection for entire test run."""
-    conn = Database.connect("test://localhost/testdb")
-    yield conn  # yield = setup/teardown pattern
-    conn.close()
+def db_engine(tmp_path_factory):
+    """One engine per run; tmp_path_factory is the session-scoped temp-dir helper."""
+    from sqlalchemy import create_engine
+    engine = create_engine(f"sqlite:///{tmp_path_factory.mktemp('db') / 'test.db'}")
+    yield engine
+    engine.dispose()                 # teardown runs even if tests failed
 
 
 @pytest.fixture
-def db_with_data(db_connection):
-    """Fixture composing another fixture."""
-    db_connection.execute("INSERT INTO invoices VALUES (...)")
-    yield db_connection
-    db_connection.execute("DELETE FROM invoices")
+def db_conn(db_engine):
+    """Composes db_engine; rolls back so tests never see each other's writes."""
+    with db_engine.connect() as conn:
+        tx = conn.begin()
+        yield conn
+        tx.rollback()
 ```
 
 ## Fixture Scopes
 
 | Scope | Created | Destroyed | Use Case |
 |-------|---------|-----------|----------|
-| `function` | Per test function | After test ends | Default, isolated state |
-| `class` | Per test class | After class ends | Shared across class methods |
-| `module` | Per .py file | After module ends | Expensive module-level setup |
-| `package` | Per package | After package ends | Package-level resources |
-| `session` | Once per run | After all tests | DB connections, Spark sessions |
+| `function` | Per test (default) | After the test | Mutable, isolated state |
+| `class` | Per test class | After the class | Shared across methods |
+| `module` | Per .py file | After the module | Expensive, read-only setup |
+| `package` | Per package | After the package | Package-level resources |
+| `session` | Once per run | At the end | SparkSession, DB engines |
+
+## Built-in Fixtures
+
+| Fixture | Purpose |
+|---------|---------|
+| `tmp_path` / `tmp_path_factory` | Unique `pathlib.Path` temp dir per test / per session (`tmpdir` is deprecated) |
+| `monkeypatch` | `setattr`, `setenv`, `delenv`, `setitem`, `chdir`, undone after the test |
+| `capsys` / `caplog` | Captured stdout/stderr / log records |
+| `request` | Fixture introspection; `request.param` for parametrized fixtures |
+| `subtests` | Independent sub-assertions in one test (pytest 9.0+) |
 
 ## conftest.py
 
 ```python
-# tests/conftest.py -- fixtures available to ALL tests in this directory
+# tests/conftest.py -- fixtures here are visible to every test below this directory
 import pytest
 
 
-@pytest.fixture
-def api_client():
-    """Shared fixture across all test files."""
-    from myapp.client import APIClient
-    client = APIClient(base_url="http://localhost:8000")
-    yield client
-    client.close()
-
-
 @pytest.fixture(autouse=True)
-def reset_environment(monkeypatch):
-    """Autouse: runs for EVERY test automatically."""
+def test_environment(monkeypatch):
+    """Autouse: applied to every test without being requested."""
     monkeypatch.setenv("ENV", "test")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 ```
 
-## Yield Fixtures (Setup + Teardown)
+## Files Without Leaks
 
 ```python
-import pytest
-import tempfile
-import os
-
-
-@pytest.fixture
-def temp_csv():
-    """Create temp file, clean up after test."""
-    path = tempfile.mktemp(suffix=".csv")
-    with open(path, "w") as f:
-        f.write("id,name,amount\n1,Acme,100.00\n")
-    yield path  # test runs here
-    os.unlink(path)  # teardown: always runs
+def test_reads_csv(tmp_path):
+    path = tmp_path / "data.csv"                       # unique per test; pytest keeps the last 3 runs
+    path.write_text("id,name,amount\n1,Acme,100.00\n")
+    assert load_csv(path)[0]["name"] == "Acme"
 ```
+
+`tempfile.mktemp()` is deprecated and unsafe (another process can create the file between
+naming and opening); use `tmp_path`, or `tempfile.mkstemp()` outside pytest.
 
 ## Common Mistakes
 
 ### Wrong
 
 ```python
-# Mutable default shared across tests -- causes flaky tests
-@pytest.fixture
+@pytest.fixture(scope="module")          # one list shared by every test in the module
 def shared_list():
-    return []  # Same list object if scope > function
+    return []
 
 def test_a(shared_list):
     shared_list.append(1)
     assert len(shared_list) == 1
 
 def test_b(shared_list):
-    # FLAKY: depends on test_a execution order
-    assert len(shared_list) == 0
+    assert len(shared_list) == 0         # FAILS after test_a; order-dependent
 ```
 
 ### Correct
 
 ```python
-# Use function scope (default) for mutable state
-@pytest.fixture
+@pytest.fixture                          # function scope: a new list per test
 def fresh_list():
-    return []  # New list for every test
-
-def test_a(fresh_list):
-    fresh_list.append(1)
-    assert len(fresh_list) == 1
+    return []
 
 def test_b(fresh_list):
-    assert len(fresh_list) == 0  # Always passes
+    assert len(fresh_list) == 0          # always passes
 ```
 
-## Async Fixtures (pytest-asyncio)
+## Async Fixtures
+
+Async fixtures need pytest-asyncio and, in its default strict mode, `@pytest_asyncio.fixture`
+(not `@pytest.fixture`); session-wide ones also need `loop_scope="session"`. See
+[Async Testing](async-testing.md).
 
 ```python
-import pytest
+import pytest_asyncio
 
 
-@pytest.fixture
-async def async_client():
-    """Async fixture with setup and teardown."""
-    import httpx
-    async with httpx.AsyncClient(base_url="http://test") as client:
-        yield client
-
-
-@pytest.fixture(scope="session")
-async def async_db_pool():
-    """Session-scoped async fixture."""
-    import asyncpg
-    pool = await asyncpg.create_pool("postgresql://localhost/test")
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
+async def db_pool():
+    pool = await create_pool("postgresql://localhost/test")
     yield pool
     await pool.close()
-
-
-@pytest.mark.asyncio
-async def test_fetch(async_client):
-    response = await async_client.get("/api/health")
-    assert response.status_code == 200
-```
-
-## tmp_path Fixture (Built-in)
-
-```python
-def test_write_file(tmp_path):
-    """tmp_path provides a unique temporary directory as pathlib.Path."""
-    file = tmp_path / "data.json"
-    file.write_text('{"key": "value"}')
-
-    assert file.exists()
-    assert "key" in file.read_text()
 ```
 
 ## Related
 
 - [Fixture Factories](../patterns/fixture-factories.md)
-- [Mocking](../concepts/mocking.md)
+- [Async Testing](../concepts/async-testing.md)
 - [Integration Tests](../patterns/integration-tests.md)
+
+## Sources
+
+- https://docs.pytest.org/en/stable/how-to/fixtures.html
+- https://docs.pytest.org/en/stable/how-to/tmp_path.html
+- https://docs.pytest.org/en/stable/reference/reference.html
+- https://docs.python.org/3/library/tempfile.html
+- https://pytest-asyncio.readthedocs.io/en/latest/reference/changelog.html

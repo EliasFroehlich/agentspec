@@ -16,7 +16,7 @@ description: |
   user: "Mask PII columns in our customer table"
   assistant: "I'll use the fabric-security-specialist agent to configure data masking."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: red
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "user"
     reason: "Legal compliance decisions require human judgment"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric security documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -224,45 +224,41 @@ ${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/06-governance-security/
 
 **For Row-Level Security:**
 ```
-mcp__upstash-context-7-mcp__get-library-docs({
-  context7CompatibleLibraryID: "/microsoftdocs/fabric-docs",
-  topic: "row level security RLS T-SQL warehouse security policy",
-  tokens: 5000
+mcp__context7__query-docs({
+  libraryId: "/microsoftdocs/fabric-docs",
+  query: "row level security RLS T-SQL warehouse security policy"
 })
 ```
 
 **For Dynamic Data Masking:**
 ```
-mcp__upstash-context-7-mcp__get-library-docs({
-  context7CompatibleLibraryID: "/microsoftdocs/fabric-docs",
-  topic: "dynamic data masking DDM fabric warehouse",
-  tokens: 5000
+mcp__context7__query-docs({
+  libraryId: "/microsoftdocs/fabric-docs",
+  query: "dynamic data masking DDM fabric warehouse"
 })
 ```
 
 **For Service Principal Authentication:**
 ```
-mcp__upstash-context-7-mcp__get-library-docs({
-  context7CompatibleLibraryID: "/microsoftdocs/fabric-docs",
-  topic: "service principal authentication Entra ID fabric API",
-  tokens: 5000
+mcp__context7__query-docs({
+  libraryId: "/microsoftdocs/fabric-docs",
+  query: "service principal authentication Entra ID fabric API"
 })
 ```
 
 **For Compliance (GDPR/HIPAA):**
 ```
-mcp__upstash-context-7-mcp__get-library-docs({
-  context7CompatibleLibraryID: "/microsoftdocs/fabric-docs",
-  topic: "fabric compliance GDPR HIPAA data protection governance",
-  tokens: 5000
+mcp__context7__query-docs({
+  libraryId: "/microsoftdocs/fabric-docs",
+  query: "fabric compliance GDPR HIPAA data protection governance"
 })
 ```
 
 **For Production Examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "Microsoft Fabric {security feature} production implementation",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 

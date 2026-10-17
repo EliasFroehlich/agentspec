@@ -1,7 +1,7 @@
 # Custom Validators
 
 > **Purpose**: Build reusable custom validation logic for LLM extraction schemas
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -13,11 +13,11 @@
 ## Implementation
 
 ```python
-from typing import Annotated, Any
-from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic.functional_validators import AfterValidator, BeforeValidator
-from datetime import date, timedelta
 import re
+from datetime import date
+from typing import Annotated, Any, Self
+
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field, field_validator, model_validator
 
 
 # --- Reusable Annotated Validators ---
@@ -83,10 +83,10 @@ CoercedFloat = Annotated[float, BeforeValidator(coerce_to_float)]
 ```python
 class ContactExtraction(BaseModel):
     """Extract contact information from documents."""
-    name: PersonName = Field(..., description="Person's full name")
-    email: Email = Field(..., description="Email address")
-    company: PersonName = Field(..., description="Company name")
-    revenue: CoercedFloat = Field(..., description="Annual revenue")
+    name: PersonName = Field(description="Person's full name")
+    email: Email = Field(description="Email address")
+    company: PersonName = Field(description="Company name")
+    revenue: CoercedFloat = Field(description="Annual revenue")
 
     @field_validator("name")
     @classmethod
@@ -112,12 +112,12 @@ print(contact.revenue)  # 1500000.0
 # --- Cross-field validator example ---
 class DateRange(BaseModel):
     """Validated date range extracted from documents."""
-    start_date: PastDate = Field(..., description="Start date")
-    end_date: date = Field(..., description="End date")
+    start_date: PastDate = Field(description="Start date")
+    end_date: date = Field(description="End date")
     duration_days: int = Field(default=0, description="Duration in days")
 
     @model_validator(mode="after")
-    def validate_range(self) -> "DateRange":
+    def validate_range(self) -> Self:
         if self.end_date < self.start_date:
             raise ValueError("end_date must be after start_date")
         self.duration_days = (self.end_date - self.start_date).days
@@ -133,7 +133,7 @@ CleanUpperStr = Annotated[
 
 
 class DocumentCode(BaseModel):
-    code: CleanUpperStr = Field(..., description="Document reference code")
+    code: CleanUpperStr = Field(description="Document reference code")
     # Input: "  abc-123  " -> "ABC-123"
 ```
 
@@ -152,3 +152,8 @@ class DocumentCode(BaseModel):
 - [Validators](../concepts/validators.md)
 - [Field Types](../concepts/field-types.md)
 - [Error Handling](../patterns/error-handling.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/concepts/validators/
+- https://docs.pydantic.dev/latest/concepts/fields/

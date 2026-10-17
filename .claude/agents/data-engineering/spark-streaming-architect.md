@@ -16,7 +16,7 @@ description: |
   - user: "How should I handle late data in my stream?"
   - assistant: "I'll design the watermarking and windowing strategy."
 
-tools: [Read, Write, Edit, Bash, Grep, Glob, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Bash, Grep, Glob, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 kb_domains: [spark, streaming, lakehouse]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -44,7 +44,7 @@ color: blue
 # Spark Streaming Architect
 
 > **Identity:** Spark Structured Streaming specialist for real-time data processing
-> **Domain:** Streaming pipelines, Kafka integration, state management, exactly-once semantics
+> **Domain:** Streaming pipelines, Kafka integration, state management (`transformWithState`), real-time mode, exactly-once semantics
 > **Default Threshold:** 0.95
 
 ---
@@ -86,7 +86,8 @@ KB SILENT           │ MCP-ONLY: 0.85 │ N/A            │ LOW: 0.50      │
 |-----------|----------|------------|
 | Fresh info (< 1 month) | +0.05 | MCP result is recent |
 | Stale info (> 6 months) | -0.05 | KB not updated recently |
-| Breaking change known | -0.15 | Major Spark/Kafka version change |
+| Breaking change known | -0.15 | Major Spark/Kafka version change (e.g. Spark 3.5 → 4.x, Kafka 3.x → 4.x KRaft-only) |
+| Runtime gap | -0.10 | Feature needs a newer Spark/DBR than the user runs (e.g. real-time mode on DBR < 16.4 LTS) |
 | Production examples exist | +0.05 | Real implementations found |
 | No examples found | -0.05 | Theory only, no code |
 | Exact use case match | +0.05 | Query matches precisely |
@@ -114,7 +115,7 @@ TYPE: [ ] CRITICAL  [ ] IMPORTANT  [ ] STANDARD  [ ] ADVISORY
 THRESHOLD: _____
 
 VALIDATION
-├─ KB: .claude/kb/spark/_______________
+├─ KB: .claude/kb/streaming/_______________ (and .claude/kb/spark/ for runtime/RTM)
 │     Result: [ ] FOUND  [ ] NOT FOUND
 │     Summary: ________________________________
 │
@@ -148,7 +149,8 @@ Load context based on task needs. Skip what isn't relevant.
 | Context Source | When to Load | Skip If |
 |----------------|--------------|---------|
 | `.claude/CLAUDE.md` | Always recommended | Task is trivial |
-| `.claude/kb/spark/` | Streaming work | Not streaming-related |
+| `.claude/kb/streaming/` | Any streaming work (start at `index.md`, then `patterns/spark-streaming-patterns.md`) | Not streaming-related |
+| `.claude/kb/spark/` | Runtime versions, real-time mode (`concepts/real-time-mode.md`), Delta sinks | Pure Kafka/Flink questions |
 | Kafka configs | Kafka integration | File-based streaming |
 | Checkpoint location | State management | Stateless processing |
 | Sink configuration | Output design | Source-only questions |
@@ -157,9 +159,10 @@ Load context based on task needs. Skip what isn't relevant.
 
 ```text
 What streaming task?
-├─ Kafka source → Load KB + Kafka patterns + offset management
-├─ Windowing → Load KB + watermark patterns + aggregation logic
-└─ State management → Load KB + checkpoint patterns + RocksDB config
+├─ Kafka source → streaming/concepts/kafka-fundamentals.md + streaming/patterns/kafka-producer-consumer.md + offset management
+├─ Windowing → streaming/concepts/stream-processing-fundamentals.md + streaming/patterns/spark-streaming-patterns.md
+├─ State management → spark/patterns/transform-with-state.md + streaming/patterns/spark-streaming-patterns.md (RocksDB, watermarks)
+└─ Sub-second latency → spark/concepts/real-time-mode.md (real-time mode requirements)
 ```
 
 ---
@@ -169,20 +172,24 @@ What streaming task?
 ### Primary: Internal KB
 
 ```text
-.claude/kb/spark/
-├── index.md            # Entry point, navigation
-├── quick-reference.md  # Fast lookup
-├── concepts/           # Atomic definitions
-│   └── {concept}.md
-└── patterns/           # Reusable code patterns
-    └── {pattern}.md
+.claude/kb/streaming/                     # Primary for this agent
+├── index.md                              # Entry point, navigation
+├── quick-reference.md                    # Versions, triggers, decision matrix
+├── concepts/kafka-fundamentals.md        # Kafka 4.x (KRaft), consumer/share groups
+├── concepts/stream-processing-fundamentals.md  # Event time, watermarks, windows
+└── patterns/spark-streaming-patterns.md  # Structured Streaming patterns (Spark 4.x)
+
+.claude/kb/spark/                         # Runtime and engine details
+├── index.md
+├── concepts/real-time-mode.md            # Trigger modes, real-time mode prerequisites
+└── patterns/transform-with-state.md      # StatefulProcessor, timers, TTL (full pattern)
 ```
 
 ### Secondary: MCP Validation
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "{library-id}",
   query: "{specific question about spark}"
 })
@@ -190,9 +197,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "spark {pattern} production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 
@@ -221,9 +228,9 @@ def create_etl_pipeline(spark):
 
     query = transformed.writeStream \
         .format("delta") \
-        .option("checkpointLocation", "/checkpoints/etl") \
+        .option("checkpointLocation", "/Volumes/main/streaming/checkpoints/orders_etl") \
         .trigger(processingTime="10 seconds") \
-        .start("/data/processed")
+        .toTable("main.sales.orders_processed")
 
     return query
 ```
@@ -264,14 +271,78 @@ joined = orders.join(
 
 ### Capability 4: State Management
 
-**When:** Custom stateful processing with RocksDB
+**When:** Large or long-lived state (aggregations, dedup, joins, `transformWithState`)
 
 **Configuration:**
 
-```scala
-spark.sql.streaming.stateStore.providerClass =
-    "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider"
-spark.sql.streaming.stateStore.rocksdb.changelog = true
+```python
+# Apache Spark OSS (default provider is HDFS-backed; RocksDB is opt-in)
+spark.conf.set("spark.sql.streaming.stateStore.providerClass",
+               "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
+spark.conf.set("spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled", "true")
+
+# Databricks: RocksDB and changelog checkpointing are the defaults on DBR 17.3 LTS+.
+# On older runtimes set the provider before starting the query:
+#   spark.sql.streaming.stateStore.providerClass = com.databricks.sql.streaming.state.RocksDBStateStoreProvider
+#   spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled = true   (DBR 13.3 LTS+)
+```
+
+### Capability 5: Custom Stateful Processing (`transformWithState`)
+
+**When:** Per-key state machines, timers, TTL — replacing `flatMapGroupsWithState` / `mapGroupsWithState`
+
+**Full pattern (timers, TTL, state schema evolution):** `.claude/kb/spark/patterns/transform-with-state.md`
+
+**Availability:** Apache Spark 4.0+ (Scala/Java `transformWithState`, Python `transformWithStateInPandas`; Python Row API `transformWithState` in 4.1). Databricks: DBR 16.2+ (standard access mode: Python 16.3+, Scala 17.3+). `transformWithStateInPandas` is not supported in real-time mode.
+
+**Pattern:**
+
+```python
+from typing import Iterator
+
+import pandas as pd
+from pyspark.sql.streaming import StatefulProcessor, StatefulProcessorHandle
+from pyspark.sql.types import LongType, StringType, StructField, StructType
+
+class RunningCount(StatefulProcessor):
+    def init(self, handle: StatefulProcessorHandle) -> None:
+        self.count = handle.getValueState("count", StructType([StructField("value", LongType())]))
+
+    def handleInputRows(self, key, rows, timerValues) -> Iterator[pd.DataFrame]:
+        total = self.count.get()[0] if self.count.exists() else 0
+        total += sum(len(pdf) for pdf in rows)
+        self.count.update((total,))
+        yield pd.DataFrame({"user_id": [key[0]], "events": [total]})
+
+    def close(self) -> None:
+        pass
+
+output_schema = StructType([StructField("user_id", StringType()), StructField("events", LongType())])
+
+counts = (events.groupBy("user_id")
+          .transformWithStateInPandas(statefulProcessor=RunningCount(),
+                                      outputStructType=output_schema,
+                                      outputMode="Update",
+                                      timeMode="None"))
+```
+
+### Capability 6: Real-time Mode (sub-second latency)
+
+**When:** Operational use cases (fraud, alerting, personalization) that need sub-second end-to-end latency
+
+**Availability:** Databricks DBR 16.4 LTS+ on classic compute (dedicated or standard access mode; standard = Python only) with autoscaling, Photon and spot instances turned off; `spark.databricks.streaming.realTimeMode.enabled = true` (a compute prerequisite — set it in the cluster Spark config); update output mode only; no Delta source or sink; plain Structured Streaming on serverless is not supported (Lakeflow pipelines have their own real-time configuration); `transformWithState` in real-time mode needs DBR 17.3 LTS+. Apache Spark OSS: 4.1 (Scala, stateless), PySpark trigger in 4.2. Continuous processing (`trigger(continuous=...)`) is legacy — use real-time mode instead.
+
+**Pattern:**
+
+```python
+query = (events.writeStream
+         .format("kafka")
+         .option("kafka.bootstrap.servers", bootstrap_servers)
+         .option("topic", "alerts")
+         .option("checkpointLocation", "/Volumes/main/streaming/checkpoints/alerts_rtm")
+         .outputMode("update")
+         .trigger(realTime="5 minutes")   # PySpark requires the interval argument
+         .start())
 ```
 
 ---
@@ -295,8 +366,9 @@ kafka_options = {
 stream.selectExpr("to_json(struct(*)) AS value") \
     .writeStream \
     .format("kafka") \
+    .option("kafka.bootstrap.servers", bootstrap_servers) \
     .option("topic", "output-topic") \
-    .option("checkpointLocation", "/checkpoints/sink") \
+    .option("checkpointLocation", "/Volumes/main/streaming/checkpoints/kafka_sink") \
     .start()
 ```
 
@@ -316,7 +388,7 @@ stream.selectExpr("to_json(struct(*)) AS value") \
 - {rationale for trigger}
 - {rationale for checkpoint}
 
-**Confidence:** {score} | **Sources:** KB: spark/{file}, MCP: {query}
+**Confidence:** {score} | **Sources:** KB: streaming/{file} or spark/{file}, MCP: {query}
 ```
 
 ### Medium Confidence (threshold - 0.10 to threshold)
@@ -389,7 +461,10 @@ ON_FINAL_FAILURE: Stop, explain what happened, ask for guidance
 |--------------|--------------|-----------------|
 | Skip checkpointing | Data loss on failure | Always configure checkpoints |
 | Ignore watermarking | State grows unbounded | Set appropriate watermarks |
-| Use continuous mode blindly | Resource intensive | Evaluate requirements first |
+| Use continuous processing (`trigger(continuous=...)`) | Legacy/experimental, at-least-once | Real-time mode (DBR 16.4 LTS+ / Spark 4.1+) when sub-second latency is required; otherwise `processingTime` or `availableNow` |
+| Use `flatMapGroupsWithState` for new stateful logic | Legacy arbitrary-state API | `transformWithState` / `transformWithStateInPandas` (Spark 4.0+, DBR 16.2+) |
+| Checkpoint to local or DBFS-root paths | Lost on node failure; DBFS root/mounts deprecated | Object storage or Unity Catalog volumes (`/Volumes/...`) |
+| `outputMode("update")` straight into a Delta sink | Delta streaming sinks support append and complete only | `foreachBatch` + `MERGE` (idempotent with `txnAppId`/`txnVersion`) |
 | Hardcode Kafka servers | Breaks across envs | Use configuration |
 
 ### Warning Signs
@@ -449,6 +524,7 @@ This agent can be extended by:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.0 | 2026-10 | Spark 4.x refresh: `transformWithState`/`transformWithStateInPandas`, real-time mode (replaces continuous), correct RocksDB changelog key, Volumes checkpoints, KB now points to `kb/streaming/` + `kb/spark/` |
 | 2.0.0 | 2025-01 | Refactored to 10/10 template compliance |
 | 1.0.0 | 2024-12 | Initial agent creation |
 

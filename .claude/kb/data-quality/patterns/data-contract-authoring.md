@@ -1,150 +1,184 @@
 # Data Contract Authoring
 
-> **Purpose**: Full ODCS v3.1 YAML template with schema, relationships, SLA, ownership, CI/CD enforcement
-> **MCP Validated**: 2026-03-26
+> **Purpose**: A complete ODCS v3.2.0 contract for a Databricks table — schema, quality rules, relationships, SLAs, support, team — validated against the official JSON Schema
+> **Confidence**: 0.95
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Defining a formal interface between data producers and consumers
-- Establishing SLAs for freshness, completeness, and availability
-- Enabling CI/CD validation of schema changes (breaking change detection)
-- Implementing data mesh ownership boundaries
+- Formalizing the interface between a producing team and its consumers
+- Declaring quality rules and SLAs once, then executing them with `datacontract test` or exporting them to dbt / Soda / GX
+- Gating schema changes in CI with `datacontract breaking`
+- Giving catalogs and AI agents an authoritative description of a dataset (`description`, `context`)
 
 ## Implementation
 
 ```yaml
-# contracts/commerce/orders.contract.yaml
-# Open Data Contract Standard (ODCS) v3.1
-apiVersion: v3.1.0
+# contracts/sales/orders.odcs.yaml — ODCS v3.2.0
+apiVersion: v3.2.0
 kind: DataContract
-metadata:
-  name: orders
-  version: 2.1.0
-  description: "Commerce order events — one record per order state change"
-  owner: commerce-data-team@company.com
-  domain: commerce
-  tags: [finance, revenue, critical]
-  slack_channel: "#data-commerce-alerts"
-  classification: internal
+id: sales-orders
+name: orders
+version: 2.1.0
+status: active
+domain: sales
+tags: [sales, critical]
+description:
+  purpose: One row per order (latest state) for revenue reporting.
+  limitations: Orders older than 3 years are archived and excluded.
+  usage: Join to customers on customer_id; aggregate by order_date.
+
+servers:
+  - server: prod
+    type: databricks
+    environment: prod
+    host: ${DATABRICKS_HOST}        # ODCS 3.2 variable, resolved by tooling
+    catalog: main
+    schema: sales
+  - server: dev
+    type: databricks
+    environment: dev
+    host: ${DATABRICKS_HOST}
+    catalog: dev
+    schema: sales
 
 schema:
-  type: table
-  database: analytics
-  schema: silver
-  table: orders
-  columns:
-    - name: order_id
-      type: varchar(36)
-      required: true
-      unique: true
-      description: "UUID primary key"
-    - name: customer_id
-      type: varchar(36)
-      required: true
-      description: "FK to dim_customers"
-    - name: amount
-      type: decimal(12,2)
-      required: true
-      constraints:
-        minimum: 0
-    - name: currency_code
-      type: varchar(3)
-      required: true
-      constraints:
-        pattern: "^[A-Z]{3}$"
-    - name: status
-      type: varchar(20)
-      required: true
-      constraints:
-        enum: [pending, completed, cancelled, refunded]
-    - name: order_date
-      type: date
-      required: true
-    - name: updated_at
-      type: timestamp_tz
-      required: true
+  - name: orders
+    physicalName: orders
+    physicalType: table
+    description: Order fact table, one row per order_id.
+    quality:                                    # object-level rules
+      - id: orders_not_empty
+        metric: rowCount
+        mustBeGreaterThan: 0
+      - id: orders_amount_not_negative
+        type: sql
+        query: SELECT COUNT(*) FROM {object} WHERE amount < 0
+        mustBe: 0
+    properties:
+      - name: order_id
+        logicalType: string
+        physicalType: STRING
+        primaryKey: true
+        primaryKeyPosition: 1
+        required: true
+        unique: true
+      - name: customer_id
+        logicalType: string
+        physicalType: STRING
+        required: true
+        classification: confidential
+        relationships:
+          - type: foreignKey
+            to: customers.customer_id           # shorthand <object>.<property>
+        quality:
+          - id: customer_id_null_pct
+            metric: nullValues
+            mustBeLessThan: 1
+            unit: percent
+      - name: status
+        logicalType: string
+        physicalType: STRING
+        required: true
+        enum:                                   # ODCS 3.2
+          - value: pending
+          - value: completed
+          - value: cancelled
+          - value: refunded
+      - name: amount
+        logicalType: number
+        physicalType: DECIMAL(12,2)
+        required: true
+        logicalTypeOptions:
+          minimum: 0
+      - name: updated_at
+        logicalType: timestamp
+        physicalType: TIMESTAMP
+        required: true
+  - name: customers
+    physicalType: table
+    properties:
+      - name: customer_id
+        logicalType: string
+        physicalType: STRING
+        primaryKey: true
+        required: true
 
-# NEW in ODCS v3.1: Relationships
-references:
-  - name: customer_fk
-    column: customer_id
-    referencedDataset: dim_customers
-    referencedColumn: customer_id
-    type: foreignKey
-    description: "Links orders to customer dimension"
+slaProperties:
+  - id: latency
+    property: latency
+    value: 1
+    unit: h
+    element: orders.updated_at
+  - id: update_frequency
+    property: frequency
+    value: 1
+    unit: d
+    element: orders.updated_at
+  - id: retention
+    property: retention
+    value: 3
+    unit: y
 
-quality:
-  freshness:
-    column: updated_at
-    maxStaleness: PT1H        # ISO 8601: 1 hour max
-    schedule: "*/15 * * * *"  # check every 15 minutes
-  completeness:
-    order_id: 1.0             # 100% non-null
-    customer_id: 1.0
-    amount: 0.999             # 99.9% non-null
-  volume:
-    minRowsPerDay: 500
-    maxGrowthRate: 5.0        # alert if 5x normal daily volume
-  uniqueness:
-    order_id: 1.0             # 100% unique
+support:
+  - channel: "#sales-data"
+    tool: slack
+    scope: interactive
+  - channel: sales-data-team
+    tool: email
+    url: mailto:sales-data@example.com
 
-sla:
-  availability: 99.9%
-  latency: PT30M              # data available within 30 min of event
-  support_hours: "09:00-18:00 UTC"
-  escalation:
-    p1: pagerduty://commerce-oncall
-    p2: slack://#data-commerce-alerts
-
-evolution:
-  compatibility: backward      # new versions must be backward compatible
-  deprecation_policy: "90 days notice via #data-announcements"
-  breaking_changes:
-    - "Removing a required column"
-    - "Changing column type to incompatible type"
-    - "Renaming a column"
-
-consumers:
-  - name: finance-reporting
-    owner: finance-analytics@company.com
-    usage: "Daily revenue aggregation"
-  - name: ml-churn-model
-    owner: ml-team@company.com
-    usage: "Feature extraction for churn prediction"
+team:
+  name: sales-data
+  members:
+    - username: owner@example.com
+      role: owner
+    - username: steward@example.com
+      role: data steward
 ```
 
-## Configuration (ODCS v3.1 Sections)
+This file passes `check-jsonschema` against `odcs-json-schema-v3.2.0.json` and `datacontract lint` (1.2.7).
 
-| Section | Required | Purpose |
-|---------|----------|---------|
-| `metadata` | Yes | Ownership, versioning, classification |
-| `schema` | Yes | Column definitions, types, constraints |
-| `references` | Recommended | FK relationships to other datasets (NEW in v3.1) |
-| `quality` | Recommended | Freshness, completeness, volume thresholds |
-| `sla` | Recommended | Availability, latency, escalation |
-| `evolution` | Recommended | Compatibility rules, deprecation policy |
-| `consumers` | Optional | Registered downstream dependents |
-| `vendors` | Optional | Vendor-specific extensions |
-| `team` | Optional | Team members and contact info |
-| `roles` | Optional | Access control roles |
-| `pricing` | Optional | Data product pricing (data mesh) |
-| `infrastructures` | Optional | Server and infrastructure details |
+## Configuration
+
+| Rule | Why |
+|------|-----|
+| `apiVersion`, `kind`, `id`, `version` are the only required top-level keys | Everything else is optional; unknown top-level keys are rejected (`additionalProperties: false`) |
+| `schema` is a **list** of objects; columns are `properties[]` with `name` | No `columns:`, no `type: object` map, no `format:` (use `logicalTypeOptions.format`) |
+| Put physical location in `servers[]` (`catalog`, `schema` for Databricks) | Same contract works for `dev` and `prod`; pick one with `--server` |
+| `quality[]` lives on the object (row count, multi-column duplicates, SQL) or on a property | `type` defaults to `library` when `metric` is set; SQL rules use `{object}` / `{property}` placeholders |
+| Library metrics: `nullValues`, `missingValues`, `invalidValues` (`arguments.validValues` / `pattern`), `duplicateValues`, `rowCount` | One operator per rule: `mustBe`, `mustNotBe`, `mustBeGreaterThan`, `mustBeGreaterOrEqualTo`, `mustBeLessThan`, `mustBeLessOrEqualTo`, `mustBeBetween`, `mustNotBeBetween` |
+| Freshness is an SLA: `property: latency` (plus `frequency`) | ODCS prefers `latency` to "freshness" |
+| Owners in `team.members[]` (`username`, `role`); channels in `support[]` | There is no `owner:` or `slack_channel:` key |
+| `relationships[].to` at property level (no `from`) | Object-level relationships need both `from` and `to` |
+| `${VAR}` / `${VAR:-default}` only in string values (3.2) | Keeps hosts and secrets out of Git; integer fields cannot hold variables (server `port` excepted) |
+| Lifecycle: `status` (`proposed`, `draft`, `active`, `deprecated`, `retired`) + `deprecated: true` on objects/properties (3.2) | There are no `evolution:` or `consumers:` sections |
 
 ## Example Usage
 
 ```bash
-# CI/CD: validate contract on PR
-datacontract lint contracts/commerce/orders.contract.yaml
-
-# Check for breaking changes between versions
-datacontract breaking contracts/commerce/orders.contract.yaml \
-  --against main:contracts/commerce/orders.contract.yaml
-
-# Generate dbt schema.yml from contract
-datacontract export --format dbt contracts/commerce/orders.contract.yaml
+datacontract lint contracts/sales/orders.odcs.yaml                    # schema validation
+datacontract test contracts/sales/orders.odcs.yaml --server dev       # run quality + schema checks
+datacontract breaking v2.1.0/orders.odcs.yaml orders.odcs.yaml        # compatibility impact (two files)
+datacontract export dbt-models orders.odcs.yaml --output models/sales/_orders.yml
 ```
+
+Full CLI workflow (init/import, CI gating, Databricks connection): [datacontract-cli-workflow](datacontract-cli-workflow.md).
 
 ## See Also
 
 - [data-contracts](../concepts/data-contracts.md)
-- [schema-validation](../patterns/schema-validation.md)
+- [datacontract-cli-workflow](datacontract-cli-workflow.md)
+- [schema-validation](schema-validation.md)
+
+## Sources
+
+- https://bitol-io.github.io/open-data-contract-standard/latest/fundamentals/
+- https://bitol-io.github.io/open-data-contract-standard/latest/schema/
+- https://bitol-io.github.io/open-data-contract-standard/latest/data-quality/
+- https://bitol-io.github.io/open-data-contract-standard/latest/service-level-agreement/
+- https://bitol-io.github.io/open-data-contract-standard/latest/infrastructure-servers/
+- https://bitol-io.github.io/open-data-contract-standard/latest/references/
+- https://bitol-io.github.io/open-data-contract-standard/latest/variables/
+- https://raw.githubusercontent.com/bitol-io/open-data-contract-standard/v3.2.0/schema/odcs-json-schema-v3.2.0.json
+- https://github.com/datacontract/datacontract-cli

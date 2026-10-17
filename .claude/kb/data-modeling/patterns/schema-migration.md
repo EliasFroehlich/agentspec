@@ -2,7 +2,7 @@
 
 > **Purpose**: Backward-compatible migrations, blue-green deploys, column deprecation, testing
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -15,8 +15,12 @@ Schema migrations in data warehouses must be backward-compatible to avoid breaki
 -- Safe Migration: Add column + deprecate old column
 -- ============================================================
 
--- Step 1: Additive change (always safe)
-ALTER TABLE orders ADD COLUMN customer_tier VARCHAR(20);
+-- Step 1: Additive change (always safe). On Delta, ADD COLUMN cannot carry a DEFAULT;
+-- set it afterwards with ALTER COLUMN ... SET DEFAULT (applies to new rows only).
+-- ADD COLUMN(S) IF NOT EXISTS is accepted by Databricks Runtime in practice but is
+-- not in the Databricks/Spark/Delta references and fails on OSS Spark/Delta 4.1.
+-- For documented, portable reruns, check information_schema.columns first.
+ALTER TABLE orders ADD COLUMN customer_tier STRING;
 
 -- Step 2: Backfill new column
 UPDATE orders
@@ -27,9 +31,10 @@ SET customer_tier = CASE
     ELSE 'bronze'
 END;
 
--- Step 3: Mark old column as deprecated (metadata/comment)
+-- Step 3: Mark old column as deprecated (Databricks COMMENT ON COLUMN: DBR 16.1+;
+-- older runtimes: ALTER TABLE orders ALTER COLUMN customer_level COMMENT '...')
 COMMENT ON COLUMN orders.customer_level IS
-    'DEPRECATED 2026-03-26: Use customer_tier instead. Removal: 2026-06-01';
+    'DEPRECATED <date>: Use customer_tier instead. Removal: <date>';
 
 -- Step 4: Create view for backward compatibility during transition
 CREATE OR REPLACE VIEW orders_compat AS
@@ -46,7 +51,9 @@ ALTER TABLE orders DROP COLUMN customer_level;
 -- Blue-Green Schema Deploy
 -- ============================================================
 
--- Green (new schema): create alongside existing
+-- Green (new schema): create alongside existing.
+-- CTAS cannot define a schema, identity columns or PK/FK constraints (Databricks docs).
+-- For those, CREATE TABLE orders_v2 (...full DDL...) then INSERT INTO orders_v2 SELECT ...
 CREATE TABLE orders_v2 AS
 SELECT
     order_id,
@@ -63,7 +70,8 @@ SELECT
     (SELECT SUM(total_amount) FROM orders) AS blue_sum,
     (SELECT SUM(total_amount) FROM orders_v2) AS green_sum;
 
--- Cutover: rename (atomic swap where supported)
+-- Cutover: two renames (not one atomic swap). Re-apply grants, tags, comments and
+-- clustering on orders_v2 before the swap, and check views that reference the name.
 ALTER TABLE orders RENAME TO orders_deprecated;
 ALTER TABLE orders_v2 RENAME TO orders;
 
@@ -76,14 +84,16 @@ ALTER TABLE orders_deprecated RENAME TO orders;
 
 | Change | Risk | Delta 4.x Strategy | Iceberg v3 Strategy |
 |--------|------|-------------------|-------------------|
-| Add nullable column | None | `mergeSchema` or `ALTER ADD` | `ALTER TABLE ADD` |
-| Add NOT NULL column | Low | Add nullable -> backfill -> constraint | Add with default value (v3) |
+| Add nullable column | None | `ALTER TABLE ADD COLUMN`, `MERGE/INSERT WITH SCHEMA EVOLUTION`, `mergeSchema` | `ALTER TABLE ADD` |
+| Add column with default | None | `ADD COLUMN`, then `ALTER COLUMN ... SET DEFAULT` | Default values (v3) |
+| Add NOT NULL column | Low | Add nullable -> backfill -> `ALTER COLUMN ... SET NOT NULL` | Add with default value (v3) |
 | Rename column | Medium | Column mapping mode (name) | `ALTER TABLE RENAME` |
-| Change type (widen) | Low | **Type widening** (no rewrite, 4.0+) | `ALTER TABLE ALTER TYPE` |
+| Change type (widen) | Low | **Type widening** (no rewrite; Delta 4.0 GA, DBR 15.4 LTS+) | `ALTER TABLE ALTER TYPE` |
 | Change type (narrow) | High | New column -> CAST -> validate -> swap | Not allowed (by design) |
 | Drop column | High | Column mapping + deprecation lifecycle | `ALTER TABLE DROP` + deprecation |
 | Drop table | Critical | Rename to _deprecated -> wait -> drop | Same pattern |
-| Add Variant column | None | Native (4.0+) | Native (v3) |
+| Add Variant column | None | Native (Delta 4.0+, DBR 15.4+) | Native (v3) |
+| Replace whole schema | High | `CREATE OR REPLACE TABLE` with full DDL (keeps history and grants) — never `overwriteSchema` on shared tables | `CREATE OR REPLACE TABLE` |
 
 ## Common Mistakes
 
@@ -98,7 +108,7 @@ ALTER TABLE orders DROP COLUMN customer_level;
 
 ```sql
 -- Deprecation lifecycle: mark → communicate → wait → validate → drop
-COMMENT ON COLUMN orders.customer_level IS 'DEPRECATED 2026-03-26. Removal: 2026-06-01';
+COMMENT ON COLUMN orders.customer_level IS 'DEPRECATED <date>. Removal: <date>';
 -- Wait 30+ days, verify no consumers, then drop
 ```
 
@@ -107,3 +117,13 @@ COMMENT ON COLUMN orders.customer_level IS 'DEPRECATED 2026-03-26. Removal: 2026
 - [schema-evolution](../concepts/schema-evolution.md)
 - [data-contracts](../../data-quality/concepts/data-contracts.md)
 - [scd-types](../concepts/scd-types.md)
+- [medallion schema-evolution](../../medallion/patterns/schema-evolution.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-alter-table-manage-column
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-comment
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+- https://docs.databricks.com/aws/en/tables/features/type-widening

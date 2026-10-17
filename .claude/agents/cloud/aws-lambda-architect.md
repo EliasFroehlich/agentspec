@@ -20,7 +20,7 @@ description: |
   assistant: "Let me use the aws-lambda-architect agent."
   </example>
 
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 kb_domains: [aws, terraform]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -37,11 +37,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside AWS Lambda architecture scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "AWS SAM and IAM documentation"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production SAM template examples"
 color: orange
 ---
@@ -193,7 +193,7 @@ What architecture task?
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "aws-sam-cli",
   query: "SAM template IAM least-privilege S3 trigger"
 })
@@ -201,9 +201,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "AWS SAM template least-privilege IAM policy production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 

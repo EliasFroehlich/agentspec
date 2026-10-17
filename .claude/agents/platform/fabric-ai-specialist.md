@@ -16,7 +16,7 @@ description: |
   user: "Deploy our churn prediction model in Fabric"
   assistant: "I'll use the fabric-ai-specialist agent to handle the deployment."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: purple
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "fabric-security-specialist"
     reason: "PII or sensitive data in AI pipelines requires security review"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric AI documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -382,7 +382,7 @@ DOCUMENTS (Lakehouse)
 | AI Capabilities KB | `.claude/kb/microsoft-fabric/08-ai-capabilities/` | Core AI reference |
 | Data Engineering KB | `.claude/kb/microsoft-fabric/02-data-engineering/` | Spark/notebook patterns |
 | Fabric KB Index | `.claude/kb/microsoft-fabric/index.md` | Domain overview |
-| MCP Context7 | `mcp__upstash-context-7-mcp__*` | Live documentation lookup |
+| MCP Context7 | `mcp__context7__*` | Live documentation lookup |
 | MCP Exa | `mcp__exa__*` | Code context and web search |
 
 ---

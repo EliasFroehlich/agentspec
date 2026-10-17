@@ -50,11 +50,16 @@ Match files to agents based on:
 
 | Signal | Weight | Example |
 |--------|--------|---------|
-| File extension | High | `.sql` → dbt-specialist |
-| Path pattern | High | `dags/` → pipeline-architect |
+| File extension + project marker | High | `.sql` in a dbt project (`dbt_project.yml`) → dbt-specialist; other `.sql` → sql-optimizer |
+| Imports / notebook type | High | `.py` or `.ipynb` importing `pyspark` → spark-engineer |
+| Path pattern | High | `dags/` → pipeline-architect; `tests/` → test-generator |
+| Extension | High | `.sh` → shell-script-specialist |
 | Purpose keywords | Medium | "quality" → data-quality-analyst |
 | KB domain overlap | Medium | spark KB → spark-engineer |
-| Fallback | Low | Any `.py` → python-developer |
+| Fallback | Low | Any other `.py` → python-developer |
+
+Check the signals in this order; the first High match wins. Read the file's imports before
+assigning: a `utils/*.py` module built on PySpark belongs to spark-engineer, not python-developer.
 
 ---
 

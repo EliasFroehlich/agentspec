@@ -2,11 +2,11 @@
 
 > **Purpose**: Retrieval-Augmented Generation pipeline design -- variants, chunking, hybrid search, context engineering
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Retrieval-Augmented Generation (RAG) grounds LLM responses in external knowledge by retrieving relevant documents before generation. In 2026, RAG has evolved from a simple "embed + retrieve + generate" pattern into an umbrella term covering fundamentally different architectures: Agentic RAG (agent decides when and what to retrieve), GraphRAG (knowledge graph augmentation), Corrective RAG (self-verification), and Multimodal RAG (text + image + tables). Context engineering -- treating the LLM's input as a structured system rather than a simple prompt -- has replaced basic prompt stuffing.
+Retrieval-Augmented Generation (RAG) grounds LLM responses in external knowledge by retrieving relevant documents before generation. RAG has evolved from a simple "embed + retrieve + generate" pattern into an umbrella term covering fundamentally different architectures: Agentic RAG (agent decides when and what to retrieve), GraphRAG (knowledge graph augmentation), Corrective RAG (self-verification), and Multimodal RAG (text + image + tables). Context engineering -- treating the LLM's input as a structured system rather than a simple prompt -- has replaced basic prompt stuffing. On a lakehouse, managed services now cover most stages (parsing, chunking, hybrid retrieval, reranking).
 
 ## The Pattern
 
@@ -29,7 +29,7 @@ class RAGConfig:
     rerank_top_n: int = 5
     similarity_threshold: float = 0.7
     embedding_model: str = "text-embedding-3-large"
-    generation_model: str = "claude-sonnet-4-6"
+    generation_model: str = "claude-sonnet-5-5"
 
 class RAGPipeline:
     def __init__(self, config: RAGConfig):
@@ -89,7 +89,16 @@ Question: {query}"""
 | Document-aware | Respects structure (headers, tables) | Requires parsing |
 | Late chunking | Embed full doc, then chunk (preserves context) | Higher compute |
 
-## Context Engineering (2026)
+## Managed Building Blocks
+
+| Stage | Option | Notes |
+|-------|--------|-------|
+| Parse + chunk | Databricks `ai_parse_document` (DBR 17.3+) → `ai_prep_search` (Beta, DBR 18.2+) | `chunk_to_embed` adds title/headers/page context; return `chunk_to_retrieve` to the LLM |
+| Index + hybrid search | Databricks AI Search (formerly Vector Search) | ANN, hybrid keyword-similarity (BM25), full-text (Beta), reranking, metadata filters |
+| Grounded answers with citations | Claude `document` blocks with `citations: {enabled: true}` | Citations cannot be combined with `output_config.format` (400) |
+| Low-code document + table Q&A | Databricks Genie Agents | Knowledge Assistant is legacy |
+
+## Context Engineering
 
 ```text
 Traditional prompt stuffing:
@@ -128,3 +137,12 @@ filtered = [c for c in reranked if c.score >= 0.7]
 - [RAG Pipeline Pattern](../patterns/rag-pipeline.md)
 - [Evaluation Framework](../patterns/evaluation-framework.md)
 - [Guardrails](../concepts/guardrails.md)
+- [Databricks AI Search](../../ai-data-engineering/concepts/databricks-ai-search.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ai-search/ai-search/
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_parse_document
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_prep_search
+- https://docs.databricks.com/aws/en/agents/concepts/
+- https://platform.claude.com/docs/en/build-with-claude/citations

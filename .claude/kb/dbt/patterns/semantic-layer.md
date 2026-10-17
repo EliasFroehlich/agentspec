@@ -1,138 +1,163 @@
 # Semantic Layer
 
-> **Purpose**: Centralized metric definitions via MetricFlow — semantic models, measures, dimensions
-> **MCP Validated**: 2026-03-26 | Updated with AI-readiness and governance patterns
+> **Purpose**: Centralized metric definitions with MetricFlow using the latest YAML spec (dbt 1.12+ / v2) — semantic models embedded in `models:`, simple metrics instead of measures — and how it compares with Unity Catalog metric views
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Multiple BI tools or consumers need consistent metric definitions
-- Business users define metrics differently across teams ("revenue" = gross vs net)
-- You want a single source of truth for KPIs across dashboards, reports, and APIs
-- Integrating with the dbt Semantic Layer Gateway for low-latency queries
-- **AI agents and LLMs** need consistent, trusted metric definitions (semantic inconsistency causes hallucinated answers)
-- Production governance: the semantic layer acts as a contract between data domains
+- Several BI tools, apps or AI agents must get the same answer for "revenue"
+- Metrics should live next to the dbt models that produce their data, versioned in Git
+- You run dbt on the dbt platform (hosted Semantic Layer APIs: Starter, Enterprise, Enterprise+ plans) or
+  self-host MetricFlow (`mf`, Apache 2.0 since October 2025)
+- On Databricks, compare with **Unity Catalog metric views** first (see the table below)
 
 ## Implementation
 
 ```yaml
-# models/marts/finance/_finance__semantic_models.yml
-# Define semantic model on top of an existing dbt model
-
-semantic_models:
-  - name: orders
-    defaults:
-      agg_time_dimension: order_date
-    description: "Order facts for revenue and volume metrics"
-    model: ref('fct_orders')
-
-    entities:
+# models/marts/finance/_finance__models.yml — latest Semantic Layer spec (dbt 1.12+, dbt v2)
+models:
+  - name: fct_orders
+    semantic_model:
+      enabled: true                     # required to turn the model into a semantic model
+    agg_time_dimension: order_date      # default time dimension for this model's metrics
+    columns:
       - name: order_id
-        type: primary
+        entity:
+          type: primary
+          name: order
       - name: customer_id
-        type: foreign
-
-    measures:
+        entity:
+          type: foreign
+          name: customer
+      - name: order_date
+        granularity: day                # replaces type_params.time_granularity
+        dimension:
+          type: time
+      - name: order_status
+        dimension:
+          type: categorical
+      - name: payment_method
+        dimension:
+          type: categorical
+    metrics:                            # simple metrics replace measures
       - name: order_count
+        type: simple
         agg: count
-        expr: order_id
+        expr: 1
       - name: gross_revenue
+        type: simple
         agg: sum
         expr: order_total
       - name: net_revenue
+        type: simple
         agg: sum
         expr: net_revenue
-      - name: average_order_value
-        agg: average
-        expr: order_total
+      - name: customers_with_orders
+        type: simple
+        agg: count_distinct
+        expr: customer_id
 
-    dimensions:
-      - name: order_date
-        type: time
-        type_params:
-          time_granularity: day
-      - name: order_status
-        type: categorical
-      - name: payment_method
-        type: categorical
-      - name: country
-        type: categorical
+# Metrics built from other metrics live under a top-level metrics: key
+metrics:
+  - name: revenue_per_customer
+    type: ratio
+    numerator: net_revenue
+    denominator: customers_with_orders
+  - name: net_revenue_wow_change
+    type: derived
+    expr: current_revenue - revenue_7_days_ago
+    input_metrics:
+      - name: net_revenue
+        alias: current_revenue
+      - name: net_revenue
+        offset_window: 7 days
+        alias: revenue_7_days_ago
 ```
 
 ```yaml
-# models/marts/finance/_finance__metrics.yml
-# Define derived and ratio metrics
-
-metrics:
-  - name: revenue
-    description: "Total net revenue"
-    type: simple
-    type_params:
-      measure: net_revenue
-
-  - name: revenue_per_customer
-    description: "Average revenue per unique customer"
-    type: derived
-    type_params:
-      expr: revenue / unique_customers
-      metrics:
-        - name: revenue
-        - name: unique_customers
-
-  - name: unique_customers
-    description: "Count of distinct customers"
-    type: simple
-    type_params:
-      measure:
-        name: customer_count
-        filter: "{{ Dimension('order__order_status') }} = 'completed'"
+# MetricFlow needs a daily (or finer) time spine model in the project
+models:
+  - name: time_spine_daily
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
 ```
+
+Validated 2026-10-17: `dbt parse --show-all-deprecations` (dbt-core 1.12.6, no deprecations),
+`mf validate-configs` (dbt-metricflow 0.15.0, 0 errors) and `mf query` returned results.
 
 ## Configuration
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `agg_time_dimension` | — | Default time dimension for time-series queries |
-| `type_params.time_granularity` | `day` | Finest grain for time dimension |
-| `type` (metric) | — | `simple`, `derived`, `ratio`, `cumulative` |
-| `filter` | — | MetricFlow filter syntax for metric-level filtering |
+| Latest spec (1.12+, v2, dbt platform "Latest") | Legacy spec (1.6–1.11) |
+|-----------------------------------------------|------------------------|
+| `semantic_model: {enabled: true}` on the model | Top-level `semantic_models:` with `model: ref(...)` (warning `SemanticModelDeprecated` on v2) |
+| `entity:` / `dimension:` on `columns:` | `entities:` / `dimensions:` lists with `expr` |
+| `granularity: day` on the column | `type_params.time_granularity` |
+| `agg_time_dimension` on the model (override per metric) | `defaults.agg_time_dimension` |
+| `type: simple` metrics with `agg` + `expr` in the model | `measures:` + `type: simple` metric pointing at a measure |
+| Direct keys: `numerator`/`denominator`, `input_metrics`, `input_metric`, `window`, `base_metric`… | Same keys wrapped in `type_params` |
+| **No cross-project references yet** | Supports cross-project refs (dbt Mesh) |
 
-## Production Governance Patterns
-
-| Pattern | Description |
-|---------|-------------|
-| **Domain ownership** | Each domain team owns its semantic models and metrics |
-| **Naming conventions** | Prefix metrics by domain: `finance__revenue`, `marketing__cac` |
-| **Testing** | Add data tests to underlying models; validate metric freshness |
-| **Join graph design** | Keep entity relationships explicit; avoid fan-out joins |
-| **Performance tuning** | Pre-aggregate high-cardinality dimensions; use `agg_time_dimension` |
-| **AI readiness** | Consistent definitions prevent LLM hallucination on business metrics |
+Migrate with `uvx dbt-autofix deprecations --semantic-layer`.
 
 ## Example Usage
 
-```sql
--- Query the Semantic Layer (MetricFlow CLI or API)
-mf query --metrics revenue,order_count \
-         --group-by order_date__month,country \
-         --where "order_date >= '2025-01-01'"
-
--- Output: consistent metrics regardless of which tool queries them
+```bash
+python -m pip install "dbt-metricflow[dbt-databricks]"      # self-hosted MetricFlow for your adapter
+mf validate-configs                                         # dbt platform: dbt sl validate
+mf query --metrics net_revenue,revenue_per_customer \
+         --group-by metric_time__month,order__order_status \
+         --where "{{ TimeDimension('metric_time', 'day') }} >= '2026-01-01'"
+dbt sl query --metrics net_revenue --group-by metric_time__month   # dbt platform CLI / Studio IDE
 ```
 
+Group-by names are `<entity>__<dimension>` (`order__order_status`) and `metric_time__<grain>`.
+
+### MetricFlow or Unity Catalog metric views?
+
+| Aspect | dbt Semantic Layer (MetricFlow) | Unity Catalog metric views |
+|--------|---------------------------------|----------------------------|
+| Defined in | dbt model YAML | YAML in `CREATE VIEW … WITH METRICS` (DBR 16.4+; YAML 1.1 and materialization need DBR 17.3+) |
+| Queried by | `dbt sl` / `mf`, Semantic Layer APIs and integrations | Any Databricks SQL client with `MEASURE()`; AI/BI dashboards, Genie, alerts, JDBC/ODBC, BI tools |
+| Governance | dbt project + dbt platform | Unity Catalog grants, lineage, tags |
+| Runs where | dbt platform service or self-hosted `mf` | Natively in the warehouse; optional materialization |
+| From dbt | Native | `materialized='metric_view'` in dbt-databricks 1.12.0+ ([adapter](../concepts/dbt-databricks-adapter.md)) |
+
+For Databricks-first stacks whose consumers are Databricks SQL, dashboards and Genie, UC metric views avoid a
+second semantic service; see the [metric-views KB](../../metric-views/index.md).
+
 ```yaml
-# Expose metrics to downstream consumers
+# Exposures document downstream consumers (unchanged in the latest spec)
 exposures:
   - name: executive_dashboard
     type: dashboard
     maturity: high
-    url: https://bi.company.com/exec-dashboard
+    url: https://bi.example.com/exec-dashboard
     depends_on:
       - ref('fct_orders')
     owner:
       name: Finance Analytics
-      email: finance-data@company.com
+      email: finance-data@example.com
 ```
 
 ## See Also
 
 - [mesh-architecture](../concepts/mesh-architecture.md)
-- [model-types](../concepts/model-types.md)
+- [dbt-databricks-adapter](../concepts/dbt-databricks-adapter.md)
+- [Metric views fundamentals](../../metric-views/concepts/fundamentals.md)
+
+## Sources
+
+- https://docs.getdbt.com/docs/build/latest-metrics-spec
+- https://docs.getdbt.com/docs/build/semantic-models
+- https://docs.getdbt.com/reference/semantic-model-properties
+- https://docs.getdbt.com/reference/metric-properties
+- https://docs.getdbt.com/docs/build/metricflow-commands
+- https://docs.getdbt.com/docs/build/metricflow-time-spine
+- https://docs.getdbt.com/docs/use-dbt-semantic-layer/dbt-sl
+- https://www.getdbt.com/licenses-faq
+- https://docs.databricks.com/aws/en/uc-semantics/metric-views/
+- https://github.com/databricks/dbt-databricks/releases

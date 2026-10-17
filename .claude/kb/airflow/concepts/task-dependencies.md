@@ -1,91 +1,103 @@
 # Task Dependencies
 
-> **Purpose**: Trigger rules, XCom, dynamic task mapping, asset-aware scheduling
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26 | Updated for Airflow 3.0 (Asset replaces Dataset)
+> **Purpose**: Dependencies, trigger rules (incl. `all_done_min_one_success`, 3.1+), XCom and its limits, asset conditions
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Airflow tasks form a DAG through explicit dependencies (`>>` operator or TaskFlow return values). Beyond simple sequencing, Airflow supports trigger rules (run even if upstream fails), XCom for inter-task data passing, dynamic task mapping for runtime-determined parallelism, and **asset-aware scheduling** where DAGs trigger on data asset updates rather than time. In **Airflow 3.0**, `Dataset` has been renamed to `Asset` with logical operators (`&` for AND, `|` for OR) for complex trigger conditions.
+Tasks form a Dag through explicit dependencies (`>>`, `chain()`) or TaskFlow data flow (passing one task's
+return value to another). Trigger rules decide whether a task runs given its upstream states. XCom passes
+**small** values between tasks; anything large should go to object storage, either by hand or through the
+object-storage XCom backend. Dag-to-Dag dependencies are best expressed with assets: `schedule=[asset]`
+with `&` (AND) and `|` (OR).
 
 ## The Concept
 
 ```python
-# Airflow 3.0+ — use Asset (Dataset is deprecated)
-from airflow.sdk import DAG, task, Asset
-from airflow.utils.trigger_rule import TriggerRule
 from datetime import datetime
 
-# Asset-aware scheduling: this DAG runs when orders asset updates
-orders_asset = Asset("s3://lake/silver/orders")
+from airflow.sdk import Asset, TriggerRule, dag, task
+
+orders_asset = Asset(name="orders", uri="s3://my-bucket/silver/orders/")
+
 
 @dag(schedule=[orders_asset], start_date=datetime(2026, 1, 1))
 def downstream_analytics():
-
-    @task()
+    @task
     def build_metrics() -> dict:
-        result = {"revenue": 150000, "orders": 1200}
-        return result  # automatically pushed to XCom
+        return {"revenue": 150000, "orders": 1200}       # small value -> XCom
 
-    @task()
-    def send_report(metrics: dict):
-        # XCom pulled automatically via TaskFlow
-        print(f"Revenue: ${metrics['revenue']}")
+    @task
+    def send_report(metrics: dict) -> None:              # pulled automatically
+        print(f"Revenue: {metrics['revenue']}")
 
     @task(trigger_rule=TriggerRule.ALL_DONE)
-    def cleanup():
-        """Runs regardless of upstream success/failure."""
-        pass
+    def cleanup() -> None:
+        """Runs whatever the upstream outcome."""
 
-    metrics = build_metrics()
-    send_report(metrics) >> cleanup()
+    @task(trigger_rule=TriggerRule.ALL_DONE_MIN_ONE_SUCCESS)   # 3.1+
+    def publish_partial() -> None:
+        """Runs when all non-skipped upstreams are done and at least one succeeded."""
+
+    report = send_report(build_metrics())
+    report >> [cleanup(), publish_partial()]
+
 
 downstream_analytics()
 ```
 
 ## Quick Reference
 
-| Trigger Rule | Behavior | Use Case |
-|-------------|----------|----------|
-| `all_success` (default) | All parents succeeded | Normal flow |
-| `all_failed` | All parents failed | Error-only branch |
-| `all_done` | All parents finished (any state) | Cleanup tasks |
-| `one_success` | At least one parent succeeded | Branch convergence |
-| `none_failed` | No parent failed (skipped OK) | After branching |
-| `none_skipped` | No parent skipped | Ensure all branches ran |
+| Trigger rule | Runs when |
+|--------------|-----------|
+| `all_success` (default) | All upstreams succeeded |
+| `all_failed` | All upstreams failed or upstream_failed |
+| `all_done` | All upstreams finished (any state) |
+| `all_done_min_one_success` (3.1+) | All non-skipped upstreams done and at least one succeeded |
+| `all_done_setup_success` | Like `all_done`, but at least one upstream setup task succeeded (teardown default) |
+| `all_skipped` | All upstreams skipped |
+| `one_failed` / `one_success` | At least one failed / succeeded (does not wait for the rest) |
+| `one_done` | At least one succeeded or failed |
+| `none_failed` | No upstream failed (success or skipped) |
+| `none_failed_min_one_success` | No upstream failed and at least one succeeded (typical join after branching) |
+| `none_skipped` | No upstream skipped |
+| `always` | No dependency at all |
 
-| Feature | Mechanism | Limit |
-|---------|-----------|-------|
-| XCom | Return value from `@task` | < 48KB (use S3/GCS for large data) |
-| XCom Backend | Custom backend (S3, GCS) | Unlimited |
-| Asset scheduling (3.0+) | `schedule=[Asset(...)]` | Multiple assets = AND logic |
-| Asset AND logic | `schedule=(asset1 & asset2)` | Both must update |
-| Asset OR logic | `schedule=(asset1 \| asset2)` | Either can trigger |
-| Complex conditions | `schedule=(a1 \| (a2 & a3))` | Compose AND/OR freely |
+| Feature | Mechanism | Guidance |
+|---------|-----------|----------|
+| XCom | Return value of `@task` | Designed for small values; not for dataframes |
+| Large XCom values | `[core] xcom_backend = airflow.providers.common.io.xcom.backend.XComObjectStorageBackend` | Set `[common.io] xcom_objectstorage_path` and `xcom_objectstorage_threshold` (bytes; above it goes to object storage, only a reference stays in the DB) |
+| `ti.xcom_pull(...)` | Classic operators | 3.0+: without `task_ids` it reads only the current task; pass `task_ids` |
+| State across retries | `context["task_state_store"]` (3.3+) | XComs are cleared on retry, so do not use them to persist state |
+| Asset schedule | `schedule=[a1, a2]` | Runs after all listed assets updated since the last run |
+| AND / OR | `schedule=(a1 & a2)` / `schedule=(a1 \| a2)` | Compose freely: `a1 \| (a2 & a3)` |
 
 ## Common Mistakes
 
 ### Wrong
 
 ```python
-# Passing large data through XCom — clogs metadata DB
-@task()
-def extract() -> pd.DataFrame:
-    return huge_dataframe  # serialized to metadata DB!
+@task
+def extract() -> "pd.DataFrame":
+    return huge_dataframe          # serialized into the metadata DB by the default backend
 ```
 
 ### Correct
 
 ```python
-# Pass a reference, not the data itself
-@task()
-def extract() -> str:
-    path = "s3://lake/staging/extract_20260326.parquet"
-    df.to_parquet(path)
-    return path  # lightweight reference via XCom
+from airflow.sdk import task
 
-@task()
-def transform(path: str):
+
+@task
+def extract(ds=None) -> str:
+    path = f"s3://my-bucket/staging/extract_{ds}.parquet"
+    load_source().to_parquet(path)     # load_source(): your extraction
+    return path                        # lightweight reference via XCom
+
+@task
+def transform(path: str) -> None:
+    import pandas as pd
     df = pd.read_parquet(path)
 ```
 
@@ -93,3 +105,15 @@ def transform(path: str):
 
 - [dynamic-task-mapping](../patterns/dynamic-task-mapping.md)
 - [sensors-triggers](../patterns/sensors-triggers.md)
+- [error-handling](../patterns/error-handling.md)
+
+## Sources
+
+- https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html (Trigger Rules)
+- https://airflow.apache.org/docs/apache-airflow/stable/release_notes.html (3.1.0 `ALL_DONE_MIN_ONE_SUCCESS`)
+- https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/xcoms.html
+- https://airflow.apache.org/docs/apache-airflow-providers-common-io/stable/xcom_backend.html
+- https://airflow.apache.org/docs/apache-airflow/stable/installation/upgrading_to_airflow3.html (xcom_pull default)
+- https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/task-and-asset-state-store.html
+- https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/asset-scheduling.html
+- https://airflow.apache.org/docs/task-sdk/stable/api.html

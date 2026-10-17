@@ -16,7 +16,7 @@ description: |
   user: "Deploy these changes from test to production"
   assistant: "I'll use the fabric-cicd-specialist agent to handle the deployment."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: orange
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "fabric-security-specialist"
     reason: "Credential and auth setup requires security review"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric DevOps documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -485,7 +485,7 @@ STRATEGY 3: Manual Restore
 | CI/CD KB | `.claude/kb/microsoft-fabric/07-cicd-automation/` | Core CI/CD reference |
 | Fabric KB Index | `.claude/kb/microsoft-fabric/index.md` | Domain overview |
 | Governance KB | `.claude/kb/microsoft-fabric/06-governance-security/` | Service Principal auth |
-| MCP Context7 | `mcp__upstash-context-7-mcp__*` | Live documentation lookup |
+| MCP Context7 | `mcp__context7__*` | Live documentation lookup |
 | MCP Exa | `mcp__exa__*` | Code context and web search |
 
 ---

@@ -1,38 +1,44 @@
 # Testing Framework
 
-> **Purpose**: dbt test types — generic, singular, custom macros, unit tests (v1.8+), severity, store_failures
+> **Purpose**: dbt test types — generic data tests (`data_tests:` + `arguments:` + `config:`), singular tests, custom generic tests, unit tests (v1.8+), severity, stored failures
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26 | Updated with unit testing (v1.8+)
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-dbt testing ensures data quality at the model level. **Generic tests** (unique, not_null, accepted_values, relationships) are declared in YAML. **Singular tests** are standalone SQL files returning failing rows. **Custom generic tests** are Jinja macros that accept parameters. **Unit tests** (v1.8+) validate SQL modeling logic on static inputs before materialization, enabling test-driven development. Tests run via `dbt test` or `dbt build`.
+dbt has two families of tests. **Data tests** query built models and fail when they return rows: generic
+tests declared in YAML (`unique`, `not_null`, `accepted_values`, `relationships`, package tests), singular
+SQL files in `tests/`, and custom generic tests written as `{% test %}` macros. **Unit tests** (v1.8+)
+validate a SQL model's logic on static input rows before it is materialized. YAML syntax changed twice:
+`tests:` → `data_tests:` (1.8, `tests:` remains an alias) and test inputs moved under `arguments:` with
+framework options under `config:` (1.10.5; required on dbt v2).
 
 ## The Concept
 
 ```yaml
 # models/staging/stripe/_stripe__models.yml
-version: 2
-
 models:
   - name: stg_stripe__payments
     description: "Staging model for Stripe payments"
     columns:
       - name: payment_id
         description: "Primary key"
-        tests:
+        data_tests:
           - unique
           - not_null
       - name: payment_status
-        tests:
+        data_tests:
           - accepted_values:
-              values: ['succeeded', 'pending', 'failed', 'refunded']
-              severity: warn
+              arguments:
+                values: ['succeeded', 'pending', 'failed', 'refunded']
+              config:
+                severity: warn
       - name: order_id
-        tests:
+        data_tests:
           - relationships:
-              to: ref('stg_orders')
-              field: order_id
+              arguments:
+                to: ref('stg_orders')
+                field: order_id
 ```
 
 ## Unit Tests (v1.8+)
@@ -41,9 +47,9 @@ models:
 # models/marts/finance/_finance__unit_tests.yml
 unit_tests:
   - name: test_order_total_calculation
-    description: "Verify order_total = quantity * unit_price"
+    description: "order_total = quantity * unit_price; net_revenue subtracts discount"
     model: fct_orders
-    given:
+    given:                                   # mock every ref()/source() the model reads
       - input: ref('stg_stripe__orders')
         rows:
           - {order_id: 1, quantity: 3, unit_price: 10.00, discount_amount: 5.00}
@@ -56,38 +62,33 @@ unit_tests:
 
 ## Quick Reference
 
-| Test Type | Location | Returns | Use When | Min Version |
+| Test type | Location | Returns | Use when | Min version |
 |-----------|----------|---------|----------|-------------|
-| Generic (built-in) | schema.yml | Failing rows | Standard column checks | All |
-| Singular | tests/*.sql | Failing rows | Complex multi-table logic | All |
-| Custom generic | macros/tests/ | Failing rows | Reusable parameterized checks | All |
-| **Unit test** | models/*.yml | Pass/fail | Validate SQL logic on static inputs | **v1.8+** |
-| Source freshness | sources.yml | Stale flag | Monitoring upstream data | All |
+| Generic (built-in / package) | model YAML `data_tests:` | Failing rows | Standard column checks | `data_tests:` 1.8; `arguments:` 1.10.5 |
+| Singular | `tests/*.sql` | Failing rows | Multi-table business logic | All |
+| Custom generic | `tests/generic/*.sql` or `macros/` | Failing rows | Reusable parameterized checks | All |
+| **Unit test** | model YAML `unit_tests:` | Pass/fail on expected rows | Logic on static inputs | **1.8** |
+| Source freshness | source `config: freshness:` | warn/error | Upstream staleness | `config:` form 1.9 |
+
+| Key | Goes under | Examples |
+|-----|-----------|----------|
+| Test inputs | `arguments:` | `values`, `to`, `field`, `min_value`, `interval` |
+| Framework options | `config:` | `severity`, `where`, `store_failures`, `store_failures_as`, `limit`, `error_if`, `warn_if`, `tags`, `meta` |
 
 ### Unit Test Limitations
 
-- SQL models only (not Python models)
-- Models in current project only
-- No `materialized view` models
-- No recursive SQL or introspective queries
-- Table names must be aliased to unit test `JOIN` logic
+- SQL models only (not Python models); models in the current project only
+- No `materialized view` models; no recursive SQL or introspective queries
+- Alias table names to unit test `JOIN` logic; versioned models run against all versions by default
+- dbt v2 can run unit tests locally on DuckDB (`config: {compute: local}`, experimental flag
+  `DBT_ENGINE_EXPERIMENTAL_LOCAL_UNIT_TESTS=true`) — Snowflake and BigQuery projects only, not Databricks
 
 ## Common Mistakes
 
 ### Wrong
 
 ```yaml
-# No tests on a model — data quality unknown
-models:
-  - name: fct_orders
-    columns:
-      - name: order_id
-        # No tests! Duplicates will silently corrupt downstream
-```
-
-### Correct
-
-```yaml
+# Pre-1.10.5 shape: inputs and severity mixed at the test level (validation error on dbt v2)
 models:
   - name: fct_orders
     tests:
@@ -95,19 +96,46 @@ models:
           datepart: hour
           field: updated_at
           interval: 24
+          severity: warn
+```
+
+### Correct
+
+```yaml
+models:
+  - name: fct_orders
+    data_tests:
+      - dbt_utils.recency:
+          arguments:
+            datepart: hour
+            field: updated_at
+            interval: 24
+          config:
+            severity: warn
     columns:
       - name: order_id
-        tests:
+        data_tests:
           - unique
           - not_null
       - name: order_total
-        tests:
+        data_tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: true
+              arguments:
+                min_value: 0
+                inclusive: true
 ```
 
 ## Related
 
 - [generic-tests](../patterns/generic-tests.md)
-- [model-types](../concepts/model-types.md)
+- [fusion-engine](fusion-engine.md) — dbt v2 strictness and `dbt-autofix`
+- [model-types](model-types.md)
+
+## Sources
+
+- https://docs.getdbt.com/docs/build/data-tests
+- https://docs.getdbt.com/reference/resource-properties/data-tests
+- https://docs.getdbt.com/reference/data-test-configs
+- https://docs.getdbt.com/docs/build/unit-tests
+- https://docs.getdbt.com/docs/build/sources
+- https://docs.getdbt.com/reference/deprecations

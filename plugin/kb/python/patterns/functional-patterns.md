@@ -1,7 +1,7 @@
 # Functional Patterns
 
 > **Purpose**: Comprehensions, map, filter, reduce, functools for clean data transformations
-> **MCP Validated:** 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -90,13 +90,10 @@ squares = list(map(square, range(10)))
 
 ```python
 from functools import reduce
-from typing import TypeVar
 from collections.abc import Callable
 
-T = TypeVar("T")
-
-def pipe(value: T, *functions: Callable) -> T:
-    """Apply a sequence of functions to a value, left to right."""
+def pipe[T](value: T, *functions: Callable[[T], T]) -> T:  # PEP 695 (3.12+)
+    """Apply a sequence of same-type functions to a value, left to right."""
     return reduce(lambda v, fn: fn(v), functions, value)
 
 clean = pipe("  Hello, World!  ", str.strip, str.lower)
@@ -140,6 +137,9 @@ first_10 = list(islice(huge_generator(), 10))
 # batched: split into chunks (3.12+)
 for chunk in batched(range(10), 3):
     print(chunk)  # (0,1,2), (3,4,5), (6,7,8), (9,)
+
+# strict=True raises ValueError on a short last batch (3.13+, not on 3.12)
+pairs = list(batched(["k1", "v1", "k2", "v2"], 2, strict=True))
 ```
 
 ## Common Mistakes

@@ -1,158 +1,169 @@
 # Cross-Platform Cost Optimization
 
-> **Purpose:** Cost control patterns across Snowflake, Databricks, and BigQuery -- compute sizing, storage tiering, and query cost estimation
-> **Confidence:** 0.90
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Cost control across Snowflake, Databricks and BigQuery — current list prices (dated), idle-compute shutdown, spend caps, right-sizing, storage tiers and query-cost monitoring
+> **Confidence**: HIGH (prices change: re-check the linked pricing pages before quoting)
+> **MCP Validated**: 2026-10-17
 
-## Overview
+## When to Use
 
-Cloud data platform costs are driven by compute (warehouses, clusters, slots), storage (active, failsafe, long-term), and data transfer. Each platform has different pricing models and levers. Proactive cost management requires auto-suspend policies, right-sizing compute, choosing the correct pricing model, and monitoring query-level spend.
+- Estimating or comparing platform cost for a workload
+- Cutting idle compute and runaway queries
+- Choosing on-demand vs capacity/committed pricing
+- Building a weekly cost review query per platform
 
-## The Pattern
+## List Prices (as of 2026-10-17)
 
-### Auto-Suspend and Resume
+| Platform | Compute | Storage | Source |
+|----------|---------|---------|--------|
+| Snowflake | On-demand credit (AWS US East): Standard **$2.00**, Enterprise **$3.00**, Business Critical **$4.00**, VPS $6.00 | On-demand **$23/TB-month**; capacity tiers down to $13.80 | [Credit Consumption Table](https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf) (effective 2026-10-15) |
+| Databricks | List "starting at": Data Engineering (Lakeflow Jobs/Pipelines/Connect) **$0.15/DBU**, Data Warehousing **$0.22/DBU**, Interactive **$0.40/DBU**, AI **$0.07/DBU**; Lakebase **$0.069/CU**; Genie $0.07/DBU beyond free usage (free through 2027-01-31) | Your cloud object storage (some managed products bill DSUs) | [Databricks pricing](https://www.databricks.com/product/pricing) (varies by cloud, region, tier) |
+| BigQuery | On-demand **$6.25/TiB** scanned, first **1 TiB/month free**; editions pay-as-you-go per slot-hour (US): Standard **$0.04**, Enterprise **$0.06**, Enterprise Plus **$0.10** | Active logical **$0.000031507/GiB-hour** (≈ $0.023/GiB-month); long-term logical $0.000021918/GiB-hour (≈ $0.016); first 10 GiB free | [BigQuery pricing](https://cloud.google.com/bigquery/pricing) |
+
+Notes: BigQuery slot commitments (1 or 3 years) exist only for Enterprise and Enterprise Plus; editions
+bill per second with a 1-minute minimum unless you opt in to fluid scaling. Databricks prices differ by
+cloud, region, tier and classic vs serverless SKU; quote the per-product page, not the "starting at" figure.
+
+## Implementation
+
+### Stop paying for idle compute
 
 ```sql
--- Snowflake: auto-suspend after 60 seconds of inactivity
-ALTER WAREHOUSE transform_wh SET
-  AUTO_SUSPEND = 60
-  AUTO_RESUME = TRUE;
+-- Snowflake: suspend after 60 s idle, cap monthly credits
+ALTER WAREHOUSE transform_wh SET AUTO_SUSPEND = 60 AUTO_RESUME = TRUE;
 
--- Snowflake: resource monitor to cap monthly spend
 CREATE OR REPLACE RESOURCE MONITOR monthly_limit
   WITH CREDIT_QUOTA = 5000
-  TRIGGERS
-    ON 75 PERCENT DO NOTIFY
-    ON 90 PERCENT DO NOTIFY
-    ON 100 PERCENT DO SUSPEND;
-
-ALTER WAREHOUSE analytics_wh SET RESOURCE_MONITOR = monthly_limit;
+  TRIGGERS ON 75 PERCENT DO NOTIFY
+           ON 100 PERCENT DO SUSPEND
+           ON 110 PERCENT DO SUSPEND_IMMEDIATE;
+ALTER WAREHOUSE transform_wh SET RESOURCE_MONITOR = monthly_limit;
 ```
 
 ```python
-# Databricks: auto-termination on interactive clusters (minutes)
-cluster_config = {
-    "autotermination_minutes": 15,
-    "autoscale": {"min_workers": 1, "max_workers": 8},
-    "spark_conf": {
-        "spark.databricks.cluster.profile": "serverless"
-    }
-}
-
-# Databricks: use SQL Warehouses for BI (auto-suspend built in)
-# SQL Warehouse auto-stops after configurable idle period (default: 10 min)
+# Databricks: prefer serverless jobs (no idle clusters). Cost mode is per job.
+job_settings = {"performance_target": "STANDARD"}   # 4-6 min start-up, fewer DBUs, same SKU
+# Classic all-purpose compute only: terminate idle clusters
+classic_cluster = {"autotermination_minutes": 30,
+                   "autoscale": {"min_workers": 1, "max_workers": 8}}
+# SQL warehouses: Auto Stop default 10 min (serverless; 5 min UI floor, 1 min via API)
+#                 and 45 min (pro/classic; 10 min floor)
 ```
 
-```sql
--- BigQuery: no compute to suspend (serverless)
--- Control cost via: reservations, custom quotas, max_bytes_billed
-
--- Estimate query cost before running (dry run via API or console)
--- In SQL: use max_bytes_billed to cap expensive queries
-SELECT * FROM `project.dataset.large_table`
-OPTIONS(max_bytes_billed = 10737418240);  -- 10 GB limit
+```bash
+# BigQuery: serverless, so cap bytes instead of suspending compute
+bq query --use_legacy_sql=false --dry_run 'SELECT order_id FROM analytics.orders'
+bq query --use_legacy_sql=false --maximum_bytes_billed=10737418240 'SELECT ...'   # fail > 10 GiB
+# Same setting: console Query settings > Advanced, or maximumBytesBilled in the job config.
+# Project/user hard caps: custom query quotas.
 ```
 
-### Pricing Model Selection
-
-| Platform | On-Demand | Committed | When to Switch |
-|----------|-----------|-----------|---------------|
-| Snowflake | Per-second credits | Capacity commitment (1-3yr) | Steady usage > 30% utilization |
-| Databricks | Per-DBU (pay-as-you-go) | Committed DBU (1yr) | Predictable workloads |
-| BigQuery | Per-TB scanned ($7.50/TB) | Slot reservations (autoscale) | Spend > $1K/month |
-
-### Compute Sizing Formulas
+### Right-sizing rules of thumb
 
 ```text
-Snowflake Sizing:
-  Start with SMALL warehouse for all workloads
-  If query P95 > 60s → try MEDIUM (2x compute, ~same cost per query)
-  If concurrent users > 10 → add multi-cluster (scaling policy: STANDARD)
-  Rule: Double warehouse size halves execution time (linear scaling)
-  Monitor: SELECT * FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY;
+Snowflake
+  New standard warehouses default to GENERATION = '2' (Gen2) where available; test Gen2 before upsizing.
+  Adaptive Warehouses (GA 2026-06-16, Enterprise+): no manual sizing, query-based billing;
+    tune MAX_QUERY_PERFORMANCE_LEVEL and QUERY_THROUGHPUT_MULTIPLIER instead of size/clusters.
+  Concurrency problem -> multi-cluster (SCALING_POLICY = STANDARD); slow single query -> size up.
+  Interactive warehouses + interactive tables for low-latency, high-concurrency dashboards/APIs.
 
-Databricks Sizing:
-  Interactive clusters: 2-8 workers with autoscale
-  Job clusters: fixed size based on data volume
-  Rule: 1 worker per 50-100 GB of shuffle data
-  Use Photon-enabled runtimes for SQL-heavy workloads (2-5x faster)
-  Monitor: SELECT * FROM system.billing.usage;
+Databricks
+  Serverless jobs/pipelines first; Photon is always on there and default on classic jobs compute.
+  Classic: right-size from the Spark UI/query profile, enable autoscaling, use job compute, not all-purpose.
+  Tag spend with serverless usage policies (Public Preview) or budget policies.
 
-BigQuery Sizing:
-  Autoscale slots: set baseline + max slots
-  Baseline = avg concurrent queries * slots_per_query (typically 500-2000)
-  Max = peak concurrency * slots_per_query
-  Rule: Start with 100 baseline slots, autoscale to 500
-  Monitor: INFORMATION_SCHEMA.JOBS for bytes_processed per query
+BigQuery
+  < ~1 TiB/month scanned: on-demand is effectively free; steady heavy use: editions + autoscaler.
+  Set a reservation baseline for steady load and let the autoscaler cover peaks.
 ```
 
-### Storage Tiering
+### Storage tiers
 
 | Tier | Snowflake | Databricks | BigQuery |
 |------|-----------|------------|----------|
-| Hot (active) | $40/TB/mo | Cloud storage cost | $0.02/GB/mo |
-| Warm (90d+) | $40/TB/mo | Same (cloud storage) | $0.01/GB/mo (long-term) |
-| Cold (archive) | N/A (manual offload) | Glacier/Cold tier | $0.01/GB/mo (auto after 90d) |
-| Time travel | Included (1-90d) | Delta log retention | N/A (use snapshots) |
-| Failsafe | 7 days (extra cost) | N/A | N/A |
+| Active | $23/TB-month on-demand (capacity cheaper) | Cloud object storage rates | Active logical ≈ $0.023/GiB-month |
+| Long-term | Same rate (no automatic tier) | Cloud lifecycle policies (cold tiers) | Long-term logical ≈ $0.016/GiB-month after 90 days unmodified |
+| History | Time Travel (1–90 days) + 7-day Fail-safe, billed as storage | Delta log + `VACUUM` retention (7-day floor with predictive optimization) | Time travel window + fail-safe |
 
-### Query Cost Monitoring
+### Query cost monitoring
 
 ```sql
--- Snowflake: find expensive queries
-SELECT
-  query_id,
-  user_name,
-  warehouse_name,
-  total_elapsed_time / 1000 AS duration_sec,
-  credits_used_cloud_services,
-  bytes_scanned / POWER(1024, 3) AS gb_scanned
+-- Snowflake: heaviest queries in the last 7 days
+SELECT query_id, user_name, warehouse_name,
+       total_elapsed_time / 1000 AS duration_s,
+       bytes_scanned / POWER(1024, 3) AS gb_scanned
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE start_time >= DATEADD('day', -7, CURRENT_TIMESTAMP())
-ORDER BY credits_used_cloud_services DESC NULLS LAST
-LIMIT 20;
+ORDER BY total_elapsed_time DESC LIMIT 20;
 
--- BigQuery: find expensive queries (last 7 days)
-SELECT
-  job_id,
-  user_email,
-  total_bytes_processed / POWER(1024, 4) AS tb_processed,
-  total_bytes_processed / POWER(1024, 4) * 7.50 AS estimated_cost_usd,
-  total_slot_ms / 1000 AS slot_seconds
+-- Databricks: DBUs per product and SKU, last 30 days
+SELECT billing_origin_product, sku_name, SUM(usage_quantity) AS dbus
+FROM system.billing.usage
+WHERE usage_unit = 'DBU' AND usage_date >= current_date() - INTERVAL 30 DAYS
+GROUP BY ALL ORDER BY dbus DESC;
+
+-- BigQuery: on-demand cost estimate per job (US list price as of 2026-10-17)
+SELECT job_id, user_email,
+       total_bytes_billed / POW(1024, 4)        AS tib_billed,
+       total_bytes_billed / POW(1024, 4) * 6.25 AS est_usd,
+       total_slot_ms / 1000                     AS slot_seconds
 FROM `region-us`.INFORMATION_SCHEMA.JOBS
 WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-ORDER BY total_bytes_processed DESC
-LIMIT 20;
+ORDER BY total_bytes_billed DESC LIMIT 20;
 ```
 
-## Quick Reference
+## Configuration
 
 | Lever | Snowflake | Databricks | BigQuery |
 |-------|-----------|------------|----------|
-| Auto-suspend | `AUTO_SUSPEND = 60` | `autotermination_minutes` | N/A (serverless) |
-| Spend cap | Resource Monitor | Budget alerts | `max_bytes_billed` |
-| Right-size | Warehouse size | Worker count + type | Slot reservation |
-| Cost view | `WAREHOUSE_METERING_HISTORY` | `system.billing.usage` | `INFORMATION_SCHEMA.JOBS` |
-| Partitioning | Micro-partitions (auto) | Delta ZORDER/OPTIMIZE | Partition by date column |
+| Idle shutdown | `AUTO_SUSPEND = 60` | Serverless; `autotermination_minutes`; SQL warehouse Auto Stop | N/A (serverless) |
+| Spend cap | Resource monitor | Budgets / usage policies | Maximum bytes billed, custom quotas |
+| Right-size | Size, Gen2, Adaptive | Serverless mode, worker count/type | Edition + reservation baseline |
+| Cost view | `ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY` | `system.billing.usage` | `INFORMATION_SCHEMA.JOBS` |
+| Data layout | Micro-partitions + clustering keys | Liquid clustering, `CLUSTER BY AUTO` (replaces partitioning and ZORDER) | Partition + cluster |
 
-## Common Mistakes
+## Example Usage
 
 ### Wrong
+
+```python
+# Databricks: this is the legacy High-Concurrency profile, NOT serverless compute
+new_cluster = {"spark_conf": {"spark.databricks.cluster.profile": "serverless"}}
+```
+
 ```sql
--- Snowflake: leaving a 4XL warehouse running overnight with AUTO_SUSPEND = 3600
-ALTER WAREHOUSE reporting_wh SET WAREHOUSE_SIZE = '4X-LARGE' AUTO_SUSPEND = 3600;
+-- BigQuery: SELECT has no OPTIONS clause; this fails to parse
+SELECT * FROM analytics.large_table OPTIONS(max_bytes_billed = 10737418240);
 ```
 
 ### Correct
-```sql
--- Scale up for the job, then scale back down; use aggressive auto-suspend
-ALTER WAREHOUSE reporting_wh SET WAREHOUSE_SIZE = '4X-LARGE' AUTO_SUSPEND = 60;
--- After batch completes, resize for ad-hoc queries
-ALTER WAREHOUSE reporting_wh SET WAREHOUSE_SIZE = 'MEDIUM';
+
+```python
+# Databricks serverless job task: just omit the cluster spec
+task = {"task_key": "etl", "notebook_task": {"notebook_path": "/Workspace/Shared/etl/main"}}
 ```
 
-## Related
+## See Also
 
-- [Snowflake Patterns](snowflake-patterns.md) -- Warehouse sizing and compute patterns
-- [Databricks Patterns](databricks-patterns.md) -- Cluster and DBU management
-- [BigQuery Patterns](bigquery-patterns.md) -- Slot reservations and partitioning
+- [Snowflake Patterns](snowflake-patterns.md) — Gen2 and Adaptive warehouse DDL
+- [Databricks Patterns](databricks-patterns.md) — serverless jobs, access modes
+- [BigQuery Patterns](bigquery-patterns.md) — dry run, partition pruning
+
+## Sources
+
+- https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf
+- https://docs.snowflake.com/en/user-guide/warehouses-gen2
+- https://docs.snowflake.com/en/user-guide/warehouses-adaptive
+- https://docs.snowflake.com/en/release-notes/2026/other/2026-06-16-adaptive-compute-ga
+- https://docs.snowflake.com/en/release-notes/2025/other/2025-12-11-interactive-tables-ga
+- https://docs.snowflake.com/en/sql-reference/sql/create-resource-monitor
+- https://www.databricks.com/product/pricing
+- https://docs.databricks.com/aws/en/jobs/run-serverless-jobs
+- https://docs.databricks.com/aws/en/compute/sql-warehouse/create
+- https://docs.databricks.com/aws/en/compute/photon
+- https://docs.databricks.com/aws/en/admin/system-tables/billing
+- https://docs.databricks.com/aws/en/delta/clustering
+- https://registry.terraform.io/providers/databricks/databricks/latest/docs/resources/cluster
+- https://cloud.google.com/bigquery/pricing
+- https://docs.cloud.google.com/bigquery/docs/best-practices-costs
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax

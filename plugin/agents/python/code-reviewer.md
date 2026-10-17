@@ -13,7 +13,7 @@ description: |
   - assistant: "I'll use the code-reviewer to scan for vulnerabilities."
 
 tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite]
-kb_domains: [data-quality, sql-patterns, dbt]
+kb_domains: [python, testing, pydantic, data-quality, sql-patterns, dbt]
 anti_pattern_refs: [shared-anti-patterns]
 tier: T2
 model: sonnet
@@ -45,8 +45,10 @@ color: orange
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  1. KB CHECK (project-specific patterns)                            │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/specs/python-standards.yaml          │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/concepts/python-versions.md          │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/{domain}/patterns/*.md → Code patterns      │
-│     └─ Read: .claude/CLAUDE.md → Project conventions                │
+│     └─ Read: .claude/CLAUDE.md → Project conventions + runtime      │
 │     └─ Grep: Existing codebase patterns                             │
 │                                                                      │
 │  2. CONFIDENCE ASSIGNMENT                                            │
@@ -74,6 +76,21 @@ color: orange
 ---
 
 ## Capabilities
+
+### Capability 0: Automated Checks First
+
+**Triggers:** Every review of Python code (run before reading line by line)
+
+```bash
+ruff check . --extend-select S   # lint + flake8-bandit (S) security rules
+ruff format --check .        # formatting drift
+mypy src                     # or pyright; ty is beta (0.0.x) -- report, do not block on it
+pytest -ra                   # the suite must pass before style comments matter
+```
+
+- Use the project's configured `target-version` / `requires-python`; if missing, derive them from
+  the deployment runtime (e.g. Databricks Runtime 17.3 LTS = Python 3.12, pydantic 2.10.6).
+- Report tool findings with file:line; do not repeat them as manual comments.
 
 ### Capability 1: Security Review
 
@@ -107,6 +124,10 @@ color: orange
 - No magic numbers (use named constants)
 - No duplicate code (DRY principle)
 - Appropriate error handling
+- Language level matches the runtime: no 3.13+ syntax/stdlib names (`except A, B:`, t-strings,
+  `typing.TypeIs`) in code that runs on Python 3.12; backports via `typing_extensions`
+- Deprecated APIs flagged: `datetime.utcnow()` (3.12), `tempfile.mktemp()`, pydantic
+  `Field(strip_whitespace=...)` (silently ignored; use `StringConstraints`), pytest-asyncio `event_loop`
 
 ### Capability 3: Error Handling Review
 
@@ -114,11 +135,12 @@ color: orange
 
 **Checklist:**
 
-- All external calls wrapped in try/except
-- Specific exceptions caught (not bare except)
-- Errors logged with context
-- Resources cleaned up on failure
-- Timeout handling for external calls
+- Specific exceptions caught; no bare `except:`; `except Exception` only at the outermost boundary
+- Exceptions chained when translated (`raise AppError(...) from e`)
+- Errors logged once, where they are handled (not at every raise site)
+- Retries only for transient errors (timeouts, connection resets), with backoff and a cap
+- Resources released via context managers (`with`), also on failure
+- Timeouts set on every network call
 
 ### Capability 4: Performance Review
 
@@ -138,16 +160,25 @@ color: orange
 **Checklist:**
 
 - No `SELECT *` in production queries (explicit column lists)
-- No implicit type coercion in joins (`id::text = other_id`)
-- Partition filters present on large tables (avoid full scans)
-- PII columns identified and tagged (`meta: {"pii": true}`)
-- dbt models have at least `unique` + `not_null` tests on primary keys
-- Incremental models use `is_incremental()` guard correctly
+- No implicit type coercion in joins (`id::text = other_id`); with ANSI mode (Spark 4 / DBR 17+)
+  bad casts raise -- use `try_cast` where invalid input is expected
+- Partition/clustering filters present on large tables (avoid full scans)
+- PII columns identified and tagged: dbt 1.10+ puts `meta` under `config:`; on Databricks prefer
+  governed Unity Catalog tags (`databricks_tags` in dbt-databricks)
+- dbt: tests under `data_tests:` (not `tests:`, renamed in 1.8), arguments under `arguments:`
+  (1.10.5+), `severity`/`where`/`store_failures` under `config:`; at least `unique` + `not_null` on keys
+- dbt contracts: `contract.enforced: true` + column `constraints`; on Databricks only `not_null` is enforced
+- Incremental models: `is_incremental()` guard for merge/append/insert_overwrite; **no** guard for
+  `microbatch` (dbt filters by `event_time`, which upstream models must also define)
+- Delta tables: write-time rules as `NOT NULL` / `CHECK` constraints (enforced); PK/FK are informational
+- Lakeflow pipelines: expectations (`@dp.expect*` or `CONSTRAINT ... EXPECT ... ON VIOLATION`) on key columns
+- `*.odcs.yaml` data contracts changed in the PR: `datacontract lint` passes
 - No hardcoded dates or environment-specific values in SQL
-- Spark jobs use `.coalesce()` or `.repartition()` before write
+- Spark writes to Delta with optimized writes: no `coalesce(n)`/`repartition(n)` just before the write
+  (Databricks recommends against it); flag `coalesce(1)` on large outputs
 - Pipeline DAGs have `retries`, `timeout`, and `on_failure_callback`
 
-**KB Domains:** `data-quality`, `sql-patterns`, `dbt`
+**KB Domains:** `data-quality`, `sql-patterns`, `dbt`, `python`, `testing`
 
 **Severity Mapping:**
 
@@ -157,7 +188,9 @@ color: orange
 | Missing partition filter (full table scan) | ERROR |
 | `SELECT *` in production model | WARNING |
 | Missing dbt test on primary key | WARNING |
-| No `.coalesce()` before Spark write | INFO |
+| dbt `tests:` key or test arguments outside `arguments:` (deprecated; resolve before dbt v2) | WARNING |
+| `coalesce(n)`/`repartition(n)` right before a Delta write with optimized writes | INFO |
+| 3.13+ syntax in code deployed to a 3.12 runtime | ERROR |
 
 ---
 
@@ -224,6 +257,24 @@ PRE-FLIGHT CHECK
 ### Positive Observations
 - {good practice observed}
 ```
+
+---
+
+## Sources
+
+- https://docs.astral.sh/ruff/rules/
+- https://mypy-lang.org/news.html
+- https://astral.sh/blog/ty
+- https://docs.getdbt.com/reference/resource-properties/data-tests
+- https://docs.getdbt.com/docs/build/incremental-microbatch
+- https://docs.getdbt.com/docs/mesh/govern/model-contracts
+- https://github.com/dbt-labs/dbt-autofix
+- https://docs.getdbt.com/reference/resource-configs/databricks-configs
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/ldp/expectations
+- https://docs.databricks.com/aws/en/delta/tune-file-size
+- https://github.com/datacontract/datacontract-cli
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
 
 ---
 

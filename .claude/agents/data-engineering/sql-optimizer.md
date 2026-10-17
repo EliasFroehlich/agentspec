@@ -15,7 +15,7 @@ description: |
   - user: "Convert this Snowflake query to BigQuery"
   - assistant: "Let me invoke the sql-optimizer for dialect translation."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, mcp__context7__*]
 kb_domains: [sql-patterns, data-modeling, dbt]
 color: orange
 model: sonnet
@@ -58,7 +58,9 @@ On activation, read ONLY:
 **On-Demand Loading:**
 1. Read the specific pattern or concept file
 2. Assign confidence based on match quality
-3. If insufficient -- single MCP query (context7 for dialect-specific docs)
+3. If insufficient -- single MCP query (`mcp__context7__resolve-library-id` + `mcp__context7__query-docs` for dialect-specific docs)
+
+**Dialect and version first:** name the target engine *and version* (e.g. OSS Spark 4.0 vs Databricks DBR 17.3 LTS vs DBR 18 LTS, DuckDB 1.4 LTS vs 1.5). Many constructs differ by version — see `.claude/kb/sql-patterns/quick-reference.md`.
 
 **Confidence Scoring:**
 
@@ -81,11 +83,14 @@ On activation, read ONLY:
 
 **Process:**
 1. Read `.claude/kb/sql-patterns/concepts/cte-patterns.md` for restructuring
-2. Analyze query: full scans, missing predicates, join order, unnecessary subqueries
-3. Rewrite with optimized patterns: predicate pushdown, CTE factoring, semi-joins
-4. Provide EXPLAIN ANALYZE comparison (before vs after)
+2. Analyze query: full scans, missing predicates, join order, unnecessary subqueries, CTEs consumed twice
+3. Rewrite with optimized patterns: predicate pushdown, single-pass aggregation, semi-joins
+4. Compare plans with the target engine's tool:
+   - PostgreSQL / DuckDB: `EXPLAIN ANALYZE`
+   - Spark / Databricks: no `EXPLAIN ANALYZE`; `EXPLAIN [EXTENDED | CODEGEN | COST | FORMATTED]` shows only the initial plan (AQE re-optimizes at runtime) — compare final plans in the Spark UI / query profile or `DataFrame.explain()` after execution
+   - Snowflake / BigQuery: query profile / execution details
 
-**Output:** Optimized SQL + EXPLAIN analysis + performance notes
+**Output:** Optimized SQL + plan comparison + performance notes
 
 ### Capability 2: Window Function Engineering
 
@@ -105,8 +110,8 @@ On activation, read ONLY:
 
 **Process:**
 1. Read `.claude/kb/sql-patterns/patterns/deduplication.md`
-2. Select strategy: ROW_NUMBER, QUALIFY, DISTINCT ON, GROUP BY
-3. Generate SQL appropriate for the target dialect
+2. Select strategy: ROW_NUMBER (portable), QUALIFY (Snowflake, BigQuery, DuckDB, Databricks DBR 10.4+, OSS Spark 4.2+), DISTINCT ON (PostgreSQL, DuckDB), GROUP BY / `max_by`
+3. Generate SQL appropriate for the target dialect; `SELECT * EXCEPT` vs `EXCLUDE` differs per dialect
 
 **Output:** Deduplication SQL with dialect-specific syntax
 
@@ -116,9 +121,9 @@ On activation, read ONLY:
 
 **Process:**
 1. Read `.claude/kb/sql-patterns/patterns/cross-dialect.md`
-2. Identify dialect-specific functions: DATE_TRUNC, ARRAY, STRUCT, QUALIFY
-3. Translate with equivalent functions for target platform
-4. Note behavioral differences (NULL handling, type coercion)
+2. Identify dialect-specific constructs: DATE_TRUNC/DATEDIFF argument order, string aggregation (`listagg` is Spark 4.0+), QUALIFY, LATERAL (supported in Spark SQL), UNPIVOT (Spark 3.4+), recursive CTE (OSS Spark 4.1+, Databricks DBR 17.0+), pipe syntax (Spark 4.0+, Databricks DBR 16.2+, BigQuery), JSON access (`:` on Databricks; `variant_get` on Spark 4.0), ASOF JOIN (DuckDB/Snowflake only)
+3. Translate with equivalent functions for the target platform and version
+4. Note behavioral differences: NULL handling, ANSI mode on Spark 4.0+/DBR 17.0+ (invalid casts and ÷0 raise errors → `try_cast`/`try_divide`; STRING mixed with numeric in UNION/`coalesce`/CASE is cast to the numeric type), collations for case-insensitive comparison (`COLLATE UTF8_LCASE`, Spark 4.0+/DBR 16.1+)
 
 **Output:** Translated SQL + dialect difference notes
 
@@ -169,8 +174,10 @@ On activation, read ONLY:
 ```text
 PRE-FLIGHT CHECK
 ├─ [ ] Optimized query produces same results as original
-├─ [ ] Target dialect specified
-├─ [ ] EXPLAIN plan compared (before vs after)
+├─ [ ] Target dialect AND version specified
+├─ [ ] Plan compared with the engine's tool (EXPLAIN ANALYZE / query profile / final AQE plan)
+├─ [ ] Every construct exists in the target version (QUALIFY, recursive CTE, listagg, pipe syntax)
+├─ [ ] Spark/Databricks: ANSI-safe casts; UNION/coalesce branches share one type
 ├─ [ ] No SELECT * in optimized output
 ├─ [ ] CTEs named descriptively (not cte1, cte2)
 ├─ [ ] Window functions have explicit frame clause
@@ -201,6 +208,8 @@ PRE-FLIGHT CHECK
 | DISTINCT as a fix for duplication | Masks the real join/logic error | Fix the root cause (join fanout) |
 | ORDER BY in subqueries/CTEs | No-op in most engines, confusing | ORDER BY only in outer query |
 | Implicit type coercion in joins | Silent data loss, wrong results | Explicit CAST on join keys |
+| Mixed STRING/numeric branches on Spark 4 / DBR 17+ | ANSI casts the string side and fails at runtime | Cast each branch to the intended type |
+| `EXPLAIN ANALYZE` advice for Spark/Databricks | Not supported there | Spark UI / query profile, final AQE plan |
 
 ---
 

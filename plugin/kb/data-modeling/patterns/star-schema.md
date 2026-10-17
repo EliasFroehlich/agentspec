@@ -2,11 +2,11 @@
 
 > **Purpose**: Complete star schema DDL — facts, dimensions, surrogate keys, degenerate dims, junk dims
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-The star schema is the foundation of dimensional modeling: a central fact table surrounded by denormalized dimension tables. Each dimension joins to the fact on a surrogate key. This pattern optimizes for read-heavy analytical queries with minimal joins.
+The star schema is the foundation of dimensional modeling: a central fact table surrounded by denormalized dimension tables. Each dimension joins to the fact on a surrogate key. This pattern optimizes for read-heavy analytical queries with minimal joins. The first DDL block is ANSI-style; the Databricks/Delta version (informational keys, liquid clustering, identity caveat) is in the last section.
 
 ## The Pattern
 
@@ -120,34 +120,39 @@ Star schemas remain the gold standard for enterprise analytics, but modern tooli
 
 | Modern Tool | How It Enhances Star Schema |
 |------------|---------------------------|
-| **Semantic layer** (dbt Metrics, Cube, AtScale) | Abstracts join complexity; analysts query metrics, not tables |
-| **Liquid clustering** (Delta 4.x) | Replaces Z-ORDER/manual partitioning on fact tables |
-| **Identity columns** (Delta 4.0+) | Native auto-increment for surrogate keys |
+| **Semantic layer** (Unity Catalog metric views, dbt Semantic Layer, Cube, AtScale) | Measures defined once over the star; metric views declare star/snowflake joins in YAML — see [joins-star-schema](../../metric-views/patterns/joins-star-schema.md) |
+| **Liquid clustering** (Delta OSS 3.1+; Databricks GA DBR 15.4 LTS, `CLUSTER BY AUTO` on UC managed tables) | Replaces Z-ORDER/manual partitioning on fact tables; up to 4 keys |
+| **Identity columns** (Delta OSS 3.3+; Databricks SQL DBR 10.4 LTS+) | Auto-increment surrogate keys; **disable concurrent transactions** on the table |
+| **Informational constraints** (Databricks, PK/FK GA DBR 15.2+) | Document relationships for BI/AI tools; `RELY` enables optimizer rewrites |
 | **Hidden partitioning** (Iceberg) | Partition facts by date without exposing layout |
-| **Materialized views** (Databricks, Snowflake) | Auto-refresh pre-joined OBT marts from star schema |
+| **Materialized views** (Databricks, Snowflake) | Refresh pre-joined OBT marts from the star schema |
 | **Data contracts** | Enforce dim/fact schemas at write time |
 
 ```sql
--- Modern star schema with Delta 4.x features
-CREATE TABLE gold.dim_customer (
-    customer_sk BIGINT GENERATED ALWAYS AS IDENTITY,  -- identity column (4.0+)
-    customer_id STRING NOT NULL,
+-- Star schema on Databricks (UC managed Delta tables)
+-- Dimension loaded by a single writer: an identity surrogate key is acceptable
+CREATE TABLE main.gold.dim_customer (
+    customer_sk   BIGINT GENERATED ALWAYS AS IDENTITY,  -- disables concurrent transactions
+    customer_id   STRING NOT NULL,
     customer_name STRING NOT NULL,
-    segment STRING NOT NULL,
-    region STRING NOT NULL,
-    is_current BOOLEAN NOT NULL DEFAULT TRUE
-) USING delta;
+    segment       STRING NOT NULL,
+    region        STRING NOT NULL,
+    is_current    BOOLEAN NOT NULL,
+    CONSTRAINT dim_customer_pk PRIMARY KEY (customer_sk) RELY   -- informational
+) CLUSTER BY AUTO;
 
-CREATE TABLE gold.fact_orders (
-    order_item_sk BIGINT GENERATED ALWAYS AS IDENTITY,
-    order_id STRING NOT NULL,
-    customer_sk BIGINT NOT NULL,
-    product_sk BIGINT NOT NULL,
-    date_sk INT NOT NULL,
-    quantity INT NOT NULL,
-    net_amount DECIMAL(12,2) NOT NULL
-) USING delta
-CLUSTER BY (date_sk, customer_sk);  -- liquid clustering
+-- Fact written by parallel jobs: no identity column; deterministic key instead
+CREATE TABLE main.gold.fact_orders (
+    order_item_key STRING NOT NULL,          -- e.g. sha2(concat_ws('|', order_id, line_no), 256)
+    order_id       STRING NOT NULL,
+    customer_sk    BIGINT NOT NULL,
+    product_sk     BIGINT NOT NULL,
+    date_sk        INT    NOT NULL,
+    quantity       INT    NOT NULL,
+    net_amount     DECIMAL(12,2) NOT NULL,
+    CONSTRAINT fact_orders_pk PRIMARY KEY (order_item_key),
+    CONSTRAINT fact_orders_customer_fk FOREIGN KEY (customer_sk) REFERENCES main.gold.dim_customer
+) CLUSTER BY (date_sk, customer_sk);          -- or CLUSTER BY AUTO
 ```
 
 ## Related
@@ -155,3 +160,13 @@ CLUSTER BY (date_sk, customer_sk);  -- liquid clustering
 - [dimensional-modeling](../concepts/dimensional-modeling.md)
 - [data-vault](data-vault.md)
 - [one-big-table](one-big-table.md)
+- [metric views](../../metric-views/index.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-constraint
+- https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/tables/clustering
+- https://docs.databricks.com/aws/en/uc-semantics/metric-views
+- https://docs.delta.io/latest/versioning.html

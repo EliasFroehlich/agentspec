@@ -1,143 +1,137 @@
 # Flink Architecture
 
-> **Purpose**: JobManager/TaskManager, checkpointing, state backends (ForSt), Flink SQL, disaggregated state
-> **Version Coverage**: Apache Flink 2.0+ (March 2025)
-> **Confidence**: 0.92
-> **MCP Validated**: 2026-03-26
+> **Purpose**: JobManager/TaskManager, checkpointing, state backends (HashMap, RocksDB, ForSt), Flink SQL, Flink 2.x changes
+> **Version Coverage**: Apache Flink 2.3.0 (2026-06-25); 2.2.1, 2.1.3, 2.0.2 maintained
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Apache Flink is a distributed stream processing engine with a master-worker architecture. The **JobManager** coordinates execution, scheduling, and fault tolerance. **TaskManagers** run the actual data processing. Flink achieves exactly-once semantics through the Chandy-Lamport distributed snapshot algorithm (checkpointing), with state stored in configurable backends.
+Apache Flink is a distributed stream processing engine with a master-worker architecture. The **JobManager** coordinates scheduling, checkpointing and recovery; **TaskManagers** run the operators. Exactly-once state consistency comes from distributed snapshots (Chandy-Lamport style checkpoint barriers), with state kept in a configurable state backend.
 
 ## The Concept
 
 ```yaml
-# Flink cluster architecture overview
+# JobManager: Dispatcher (accepts jobs) | ResourceManager (slots) | JobMaster (one per job)
+# TaskManager x N: task slots run operator subtasks; keyed state lives in the state backend
+# Checkpoint: barriers flow with the data -> each operator snapshots state -> durable storage
 #
-# JobManager (master)
-#   ├── Dispatcher       — accepts jobs, launches JobMasters
-#   ├── ResourceManager  — manages TaskManager slots
-#   └── JobMaster        — manages a single job's execution graph
-#
-# TaskManager (worker) x N
-#   ├── Task Slot 1  — runs pipeline of operators (subtasks)
-#   ├── Task Slot 2  — isolated memory, shared TCP connections
-#   └── State Backend — RocksDB or HashMapStateBackend
-#
-# Checkpointing (Chandy-Lamport)
-#   1. JobManager injects checkpoint barrier into sources
-#   2. Barriers flow through the DAG with the data
-#   3. On barrier arrival, operator snapshots its state
-#   4. Barrier alignment ensures consistency across parallel streams
-#   5. Snapshot stored to durable storage (S3, HDFS, GCS)
-```
-
-```sql
--- Flink SQL: configure checkpointing and state backend
-SET 'execution.checkpointing.interval'      = '60s';
-SET 'execution.checkpointing.mode'          = 'EXACTLY_ONCE';
-SET 'execution.checkpointing.min-pause'     = '30s';
-SET 'state.backend.type'                    = 'rocksdb';
-SET 'state.backend.incremental'             = 'true';
-SET 'state.checkpoints.dir'                 = 's3://bucket/flink/checkpoints';
-SET 'state.savepoints.dir'                  = 's3://bucket/flink/savepoints';
-SET 'state.backend.rocksdb.memory.managed'  = 'true';
+# conf/config.yaml (Flink 2.0+ reads only config.yaml; flink-conf.yaml is no longer supported)
+execution.checkpointing.interval: 60s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.min-pause: 30s
+execution.checkpointing.incremental: true
+execution.checkpointing.dir: s3://my-bucket/flink/chk
+execution.checkpointing.savepoint-dir: s3://my-bucket/flink/savepoints
+state.backend.type: rocksdb          # hashmap (default) | rocksdb | forst
+state.backend.rocksdb.memory.managed: true
 ```
 
 ## Quick Reference
 
-| Component | Role | Failure Impact |
-|-----------|------|---------------|
-| JobManager | Coordination, scheduling, checkpointing | Job restarts from last checkpoint |
-| TaskManager | Data processing, state management | Lost slots rescheduled to other TMs |
-| Checkpoint | Consistent distributed snapshot | Recovery point — resume without data loss |
-| Savepoint | User-triggered checkpoint (portable) | Job upgrades, cluster migration |
-| State Backend | Where operator state lives | RocksDB for large state, HashMap for speed |
+| Component | Role | Failure impact |
+|-----------|------|----------------|
+| JobManager | Coordination, scheduling, checkpoints | Job restarts from the last checkpoint |
+| TaskManager | Data processing, state access | Lost slots rescheduled on other TMs |
+| Checkpoint | Automatic consistent snapshot | Recovery point |
+| Savepoint | User-triggered, portable snapshot | Upgrades, rescaling, migration |
 
-| State Backend | Best For | State Size | Performance |
-|---------------|----------|-----------|-------------|
-| HashMapStateBackend | Small state, low latency | < 1 GB per TM | Fastest (heap) |
-| EmbeddedRocksDB | Large state, production (Flink 1.x) | Terabytes | Disk-backed, incremental checkpoints |
-| **ForSt (Flink 2.0+)** | **Cloud-native, disaggregated state** | **Hundreds of TB** | **Remote DFS, async access, fast rescaling** |
+| `state.backend.type` | Best for | Notes |
+|----------------------|----------|-------|
+| `hashmap` (default) | Small state, lowest latency | State on the JVM heap |
+| `rocksdb` | Large state (TB) on local disk | Incremental checkpoints |
+| `forst` (2.0+) | Disaggregated state on remote DFS | Async state access; docs mark it experimental |
 
 ## Common Mistakes
 
 ### Wrong
 
 ```sql
--- No checkpointing configured — state lost on failure
--- No state TTL — state grows unbounded
+-- No checkpointing and no state TTL: state lost on failure and grows forever
+SELECT user_id, COUNT(*) AS total_clicks FROM clicks GROUP BY user_id;
+```
 
--- Missing: SET 'execution.checkpointing.interval' = '60s';
-
-SELECT user_id, COUNT(*) AS total_clicks
-FROM clicks
-GROUP BY user_id;
--- State for every user_id grows forever!
+```yaml
+# Legacy key names: the 2.x configuration reference does not list them
+state.checkpoints.dir: s3://my-bucket/flink/chk
+state.savepoints.dir: s3://my-bucket/flink/savepoints
+state.backend.incremental: true
 ```
 
 ### Correct
 
 ```sql
--- Checkpointing enabled + state TTL to bound state size
 SET 'execution.checkpointing.interval' = '60s';
-SET 'table.exec.state.ttl'            = '86400000';  -- 24h in ms
-
-SELECT user_id, COUNT(*) AS total_clicks
-FROM clicks
-GROUP BY user_id;
--- State entries expire after 24 hours of no updates
+SET 'table.exec.state.ttl'             = '86400000';  -- 24 h in ms
+SELECT user_id, COUNT(*) AS total_clicks FROM clicks GROUP BY user_id;
 ```
-
-## Flink 2.0: Disaggregated State (ForSt Backend)
 
 ```yaml
-# Flink 2.0: ForSt state backend — remote DFS as primary storage
+execution.checkpointing.dir: s3://my-bucket/flink/chk
+execution.checkpointing.savepoint-dir: s3://my-bucket/flink/savepoints
+execution.checkpointing.incremental: true
+```
+
+## Flink 2.0: Disaggregated State (ForSt)
+
+```yaml
+# SQL jobs (docs quick start); disaggregated state is still experimental in 2.3
 state.backend.type: forst
 table.exec.async-state.enabled: true
-
-# Checkpointing required with disaggregated state
 execution.checkpointing.incremental: true
-execution.checkpointing.dir: s3://your-bucket/flink-checkpoints
+execution.checkpointing.dir: s3://my-bucket/flink/chk     # required
+state.backend.forst.primary-dir: s3://my-bucket/forst-state
+table.exec.mini-batch.enabled: false                      # not supported with async state yet
+table.optimizer.agg-phase-strategy: ONE_PHASE
 ```
-
-### Why Disaggregated State Matters
-
-| Challenge (Flink 1.x) | Solution (Flink 2.0) |
-|------------------------|----------------------|
-| Local disk constraints in containers | Remote DFS (S3/GCS/HDFS) as primary storage |
-| Spiky resource usage from compaction | Offloaded to remote storage |
-| Slow rescaling for large state (TB+) | Fast rescaling — state not tied to TaskManagers |
-| Heavy checkpoints on local disk | Light, native checkpoints to remote storage |
-
-### Async State API (State V2)
 
 ```java
-// Flink 2.0: non-blocking state access for higher throughput
-DataStream<Alert> alerts = events
-    .keyBy(Event::sourceAddress)
-    .enableAsyncState()  // enable async state access
-    .flatMap(new StateMachineMapper());
-
-// Inside the mapper: use asyncValue() instead of value()
-currentState.asyncValue()
-    .thenAccept(state -> {
-        State nextState = state.transition(evt.type());
-        currentState.asyncUpdate(nextState);
-    });
+// DataStream: enable async state on the keyed stream, then use the async state API
+KeyedStream<Event, String> keyed = events.keyBy(Event::sourceAddress).enableAsyncState();
+// inside the function: state.asyncValue().thenAccept(v -> state.asyncUpdate(next(v)));
 ```
 
-### Removed APIs in Flink 2.0
+ForSt suits very large state and fast rescaling; for small state, local state with synchronous access is the better choice.
+
+### Removed in Flink 2.0
 
 | Removed | Replacement |
 |---------|-------------|
 | `SourceFunction` / `SinkFunction` | Source V2 / Sink V2 |
-| Scala DataStream API | Java DataStream API |
-| DataSet API | DataStream API or Table API/SQL |
+| Scala DataStream API, DataSet API | Java DataStream API, Table API/SQL |
 | `TableSchema`, `TableColumn` | `Schema`, `Column`, `DataTypes` |
 | `TableSource` / `TableSink` | `DynamicTableSource` / `DynamicTableSink` |
+| `flink-conf.yaml` | `config.yaml` (standard YAML) |
+
+## Flink 2.1 to 2.3
+
+| Release | Date | Highlights |
+|---------|------|------------|
+| 1.20 | 2024-08-02 | Materialized tables introduced (FLINK-35187), not a 2.0 feature |
+| 2.1.0 | 2025-07-31 | `ML_PREDICT` table function for model inference; delta join |
+| 2.2.0 | 2025-12-04 | `VECTOR_SEARCH` (used as `LATERAL VECTOR_SEARCH(...)`); model inference in Table API; `FRESHNESS` optional in materialized tables |
+| 2.3.0 | 2026-06-25 | `FROM_CHANGELOG` / `TO_CHANGELOG` process table functions; `INSERT ... ON CONFLICT`; experimental `flink-s3-fs-native`; first-class application concept |
+
+```sql
+-- Flink 2.1+: model must be registered in the catalog; input must be append-only
+SELECT * FROM ML_PREDICT(TABLE support_tickets, MODEL ticket_classifier, DESCRIPTOR(subject, body));
+```
 
 ## Related
 
 - [stream-processing-fundamentals](../concepts/stream-processing-fundamentals.md)
 - [flink-sql-patterns](../patterns/flink-sql-patterns.md)
+- [flink-cdc-pipelines](../patterns/flink-cdc-pipelines.md)
+
+## Sources
+
+- https://flink.apache.org/downloads/
+- https://nightlies.apache.org/flink/flink-docs-stable/docs/deployment/config/
+- https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/disaggregated_state/
+- https://nightlies.apache.org/flink/flink-docs-release-2.3/docs/dev/datastream/fault-tolerance/state_v2/
+- https://nightlies.apache.org/flink/flink-docs-stable/release-notes/flink-2.0/
+- https://nightlies.apache.org/flink/flink-docs-release-1.20/release-notes/flink-1.20/
+- https://flink.apache.org/2025/07/31/apache-flink-2.1.0-ushers-in-a-new-era-of-unified-real-time-data--ai-with-comprehensive-upgrades/
+- https://flink.apache.org/2025/12/04/apache-flink-2.2.0-advancing-real-time-data--ai-and-empowering-stream-processing-for-the-ai-era/
+- https://flink.apache.org/2026/06/25/apache-flink-2.3.0-release-announcement/
+- https://nightlies.apache.org/flink/flink-docs-stable/docs/sql/reference/queries/model-inference/

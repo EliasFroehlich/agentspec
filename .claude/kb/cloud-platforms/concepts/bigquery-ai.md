@@ -1,165 +1,127 @@
 # BigQuery AI & ML Platform
 
-> **Purpose:** BigQuery ML, AI.GENERATE with Gemini, BigLake external tables, and Dataform for transformation
-> **Confidence:** 0.90
-> **MCP Validated:** 2026-03-26
+> **Purpose**: BigQuery generative AI functions (AI.GENERATE, AI.EMBED, managed AI.IF/AI.CLASSIFY/AI.SCORE/AI.AGG), Gemini model IDs, BQML and Iceberg managed tables
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-BigQuery has evolved from a serverless data warehouse into an AI-native analytics platform. BQML brings ML training and inference into SQL. AI.GENERATE calls Gemini models directly from queries. BigLake unifies access to data on GCS, S3, and Azure Blob. Dataform provides dbt-like SQL transformation workflows natively in GCP.
+BigQuery calls Gemini directly from SQL. Scalar functions (`AI.GENERATE`, `AI.EMBED`, `AI.SIMILARITY`)
+need **no remote model** and, without `connection_id`, run with the caller's end-user credentials.
+Table-valued functions (`AI.GENERATE_TEXT`, `AI.GENERATE_TABLE`, `AI.GENERATE_EMBEDDING`) still take a
+remote model (`MODEL dataset.model`). BQML keeps in-SQL training (`CREATE MODEL`, `ML.PREDICT`).
+Renames: Vertex AI is now **Gemini Enterprise Agent Platform** ("Agent Platform"); BigLake is now
+**Google Cloud Lakehouse** and BigLake metastore the **Lakehouse runtime catalog** (both 2026-04-22).
 
 ## The Concept
 
-### BigQuery ML (BQML)
-
-Train, evaluate, and predict with ML models using SQL syntax. Supports linear regression, boosted trees, DNN, time series (ARIMA_PLUS), and imported TensorFlow/ONNX models.
-
 ```sql
--- Train a classification model with BQML
-CREATE OR REPLACE MODEL `analytics.ml_models.churn_predictor`
-OPTIONS(
-  model_type = 'BOOSTED_TREE_CLASSIFIER',
-  input_label_cols = ['churned'],
-  data_split_method = 'AUTO_SPLIT',
-  max_iterations = 50,
-  learn_rate = 0.1,
-  enable_global_explain = TRUE
-) AS
+-- Scalar: no CREATE MODEL. Default endpoint is gemini-3.5-flash-lite.
 SELECT
-  customer_id,
-  tenure_months,
-  monthly_spend,
-  support_tickets_last_90d,
-  product_count,
-  churned
-FROM `analytics.features.customer_features`
-WHERE snapshot_date = CURRENT_DATE() - 1;
-
--- Evaluate the model
-SELECT *
-FROM ML.EVALUATE(MODEL `analytics.ml_models.churn_predictor`);
-
--- Predict on new data
-SELECT
-  customer_id,
-  predicted_churned,
-  predicted_churned_probs
-FROM ML.PREDICT(
-  MODEL `analytics.ml_models.churn_predictor`,
-  (SELECT * FROM `analytics.features.customer_features`
-   WHERE snapshot_date = CURRENT_DATE())
-);
-```
-
-### AI Functions (GA Jan 2026)
-
-BigQuery now offers dedicated AI functions integrated with Gemini 3.0 Pro/Flash, with simplified End User Credentials (EUC) setup -- no separate connection or service account needed:
-
-| Function | Purpose | Status |
-|----------|---------|--------|
-| `AI.GENERATE()` | Text and structured data generation via LLMs | GA (Jan 2026) |
-| `AI.EMBED()` | Embedding generation for text and images | GA (Jan 2026) |
-| `AI.SIMILARITY()` | Semantic similarity scores between text/images | GA (Jan 2026) |
-| `ML.GENERATE_TEXT()` | Text generation via Gemini, Claude, Llama | GA |
-| `ML.GENERATE_EMBEDDING()` | Text or multimodal embeddings | GA |
-| `AI.GENERATE_TABLE()` | Structured tabular data from LLMs | GA |
-
-```sql
--- Summarize customer feedback using AI.GENERATE (simplified setup)
-SELECT
-  feedback_id,
-  feedback_text,
+  ticket_id,
   AI.GENERATE(
-    MODEL `analytics.ml_models.gemini_pro`,
-    CONCAT(
-      'Summarize this customer feedback in one sentence. ',
-      'Extract sentiment (positive/negative/neutral). ',
-      'Feedback: ', feedback_text
-    )
-  ).result AS ai_summary
-FROM `analytics.raw.customer_feedback`
-WHERE created_date >= CURRENT_DATE() - 7;
+    CONCAT('Classify this support ticket: ', ticket_text),
+    endpoint      => 'gemini-3.5-flash',
+    model_params  => JSON '{"generation_config": {"thinking_config": {"thinking_level": "LOW"}}}',
+    output_schema => 'category STRING, urgency STRING, needs_human BOOL'
+  ).* EXCEPT (full_response, status)
+FROM mydataset.support_tickets;
 
--- Compute semantic similarity between queries
-SELECT
-  AI.SIMILARITY(query_a, query_b) AS similarity_score
-FROM search_pairs;
+-- Managed functions return a scalar (no status column)
+SELECT title,
+       AI.CLASSIFY(body, categories => ['tech', 'sport', 'business', 'other']) AS topic
+FROM mydataset.articles
+WHERE AI.IF(('This article is about a natural disaster: ', body));
+
+-- Embeddings and similarity (scalar)
+SELECT AI.EMBED('A piece of text', endpoint => 'gemini-embedding-001').result AS vec,
+       AI.SIMILARITY('happy', 'glad', endpoint => 'text-embedding-005') AS cosine;
 ```
 
-### BigLake
+`AI.GENERATE([prompt =>] prompt, [endpoint =>], [model_params =>], [output_schema =>],
+[connection_id =>], [request_type =>])` returns `STRUCT<result STRING, full_response JSON, status STRING>`;
+with `output_schema`, your fields replace `result`. `prompt` is a STRING or a STRUCT mixing strings and
+`ObjectRef` values (images, PDFs, audio, video). `request_type` = `SHARED` | `DEDICATED` | `UNSPECIFIED`.
 
-External tables that unify access to data across cloud storage providers:
+## Function Catalog
 
-| Feature | Description |
-|---------|-------------|
-| GCS Integration | Native external tables on Google Cloud Storage |
-| S3 / Azure Blob | Cross-cloud external tables via BigLake connections |
-| Fine-Grained Security | Row/column-level access on external data |
-| Iceberg Support | Read Apache Iceberg tables as BigLake tables |
-| Metastore | BigLake Metastore for open-format catalog |
+| Function | Kind | Returns | Status |
+|----------|------|---------|--------|
+| `AI.GENERATE` | general-purpose, scalar | STRUCT (result/full_response/status) | GA 2025-11-18 |
+| `AI.GENERATE_BOOL` / `_INT` / `_DOUBLE` | general-purpose, scalar | STRUCT with one typed field | Listed in docs |
+| `AI.GENERATE_TEXT` | table-valued, remote model | table | GA 2025-11-18 (preferred over `ML.GENERATE_TEXT`) |
+| `AI.GENERATE_TABLE` | table-valued, remote model | table with your schema | GA 2025-11-18 |
+| `AI.GENERATE_EMBEDDING` | table-valued, remote model | table + embedding column | GA 2025-11-18 (preferred over `ML.GENERATE_EMBEDDING`) |
+| `AI.EMBED` | scalar | STRUCT<result ARRAY<FLOAT64>, status> | GA 2026-03-23 |
+| `AI.SIMILARITY` | scalar | FLOAT64 cosine similarity | GA 2026-03-23 |
+| `AI.IF` | managed | BOOL | GA 2026-04-13 (optimized mode: Preview) |
+| `AI.SCORE` | managed | FLOAT64 | GA 2026-04-13 |
+| `AI.CLASSIFY` | managed | STRING (array with `output_mode`) | GA 2026-04-13 (optimized mode: Preview) |
+| `AI.AGG` | managed, aggregate | STRING (or schema via `output_schema`) | GA 2026-10-13 |
+| `AI.COUNT_TOKENS` | utility | token estimate | Listed in docs |
 
-### Dataform
+`ML.GENERATE_TEXT` / `ML.GENERATE_EMBEDDING` still work; Google recommends the `AI.*` versions for new queries.
 
-SQL-based transformation framework native to GCP (acquired from open-source project):
+## Models (as of 2026-10-17)
 
-- SQLX files with `config` blocks (similar to dbt `config()`)
-- Dependency declarations via `ref()` function
-- Assertions for data quality (like dbt tests)
-- JavaScript for reusable macros and includes
-- Git-integrated with scheduling via Cloud Composer or BigQuery
+| Use | Model IDs | Notes |
+|-----|-----------|-------|
+| Text / multimodal | `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` | `gemini-4-argon` in BigQuery GA 2026-10-13 |
+| Embeddings | `gemini-embedding-2` (GA in BigQuery 2026-10-05; multi-region/global endpoints only), `gemini-embedding-001`, `text-embedding-005` | |
+| In-slot embeddings | `model => 'embeddinggemma-300m'` (Preview) | Runs on BigQuery slots, no Agent Platform charge |
+| Retired | `gemini-2.0-flash`, `gemini-2.0-flash-lite` (2026-06-01), all 1.x and PaLM models | Calls fail |
+| Retiring | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` on 2026-10-20 | Move to 3.x |
 
-### Multimodal Tables (Preview Apr 2025)
+Always check the model versions page before pinning an ID.
 
-Store and analyze structured and unstructured data (images, documents, audio) in a single BigQuery table. Enables AI queries across mixed data types.
+## Lakehouse and Platform
 
-### Apache Iceberg Support (Preview Apr 2025)
-
-BigQuery can now read and write Apache Iceberg tables on GCS, enabling multi-engine analytics and reducing vendor lock-in.
-
-## Quick Reference
-
-| Capability | SQL Syntax | Use Case |
-|------------|-----------|----------|
-| Train model | `CREATE MODEL` | ML from SQL |
-| Predict | `ML.PREDICT()` | Batch scoring |
-| Evaluate | `ML.EVALUATE()` | Model metrics |
-| Generate text | `AI.GENERATE()` | LLM from SQL (Gemini 3.0) |
-| Embed text/images | `AI.EMBED()` | Vector creation |
-| Similarity | `AI.SIMILARITY()` | Semantic matching |
-| Structured generation | `AI.GENERATE_TABLE()` | Tabular output from LLMs |
-| External table | `CREATE EXTERNAL TABLE` | Cross-cloud access |
+| Capability | Current state |
+|------------|---------------|
+| **Apache Iceberg managed tables** (formerly BigLake tables for Apache Iceberg in BigQuery; GA 2025-06-03) | Data in your Cloud Storage bucket; DML, Storage Write API streaming, schema evolution, time travel; partitioning, multi-statement transactions and advanced runtime GA 2026-07-13 |
+| Iceberg external tables | Read Iceberg written by other engines; Iceberg v3 (binary deletion vectors) in Preview since 2026-04-15 |
+| Lakehouse runtime catalog | Apache Iceberg REST catalog for open-source engines (credential vending supported) |
+| Multimodal | `ObjectRef` columns (`OBJ.MAKE_REF`, `OBJ.GET_READ_URL`) passed straight into AI functions |
+| Conversational analytics | GA 2026-06-23 (Gemini in BigQuery agents over your data) |
+| BQML | `CREATE MODEL` (boosted trees, ARIMA_PLUS, imported ONNX/TF), `ML.EVALUATE`, `ML.PREDICT`, `ML.FORECAST` |
+| Dataform | SQLX + `ref()` transformations native to BigQuery |
 
 ## Common Mistakes
 
 ### Wrong
+
 ```sql
--- Running AI.GENERATE without any model setup
-SELECT AI.GENERATE('summarize this text');
+-- Legacy pattern: AI.GENERATE does NOT take a MODEL argument, and gemini-pro/2.0 are retired
+CREATE OR REPLACE MODEL mydataset.gemini_pro
+  REMOTE WITH CONNECTION `us.my_conn` OPTIONS (ENDPOINT = 'gemini-pro');
+SELECT AI.GENERATE(MODEL `mydataset.gemini_pro`, prompt).result FROM mydataset.t;
 ```
 
-### Correct (New: End User Credentials -- simplified setup)
-```sql
--- With EUC (Jan 2026+), no separate connection needed for Vertex AI models
--- Just authenticate via your user credentials
-SELECT AI.GENERATE(
-  MODEL `project.dataset.gemini_flash`,
-  'Summarize this text'
-).result;
-```
+### Correct
 
-### Correct (Legacy: Connection-based setup)
 ```sql
--- Create a Cloud Resource connection and remote model
-CREATE OR REPLACE MODEL `project.dataset.gemini_pro`
-  REMOTE WITH CONNECTION `project.region.connection_id`
-  OPTIONS(ENDPOINT = 'gemini-pro');
-
--- Then use it in AI.GENERATE
-SELECT AI.GENERATE(MODEL `project.dataset.gemini_pro`, prompt).result;
+-- Scalar call with an explicit current endpoint; connection optional (EUC by default)
+SELECT AI.GENERATE(prompt, endpoint => 'gemini-3.8-flash').result FROM mydataset.t;
+-- Need a partner/open model (Claude, Llama, Mistral)? Use AI.GENERATE_TEXT with a remote model.
 ```
 
 ## Related
 
-- [BigQuery Patterns](../patterns/bigquery-patterns.md) -- Scheduled queries, BQML workflows, remote functions
-- [Cross-Platform Patterns](cross-platform-patterns.md) -- BQML vs Cortex AI vs Mosaic AI
-- [Cost Optimization](../patterns/cost-optimization.md) -- Slot reservations vs on-demand pricing
+- [BigQuery Patterns](../patterns/bigquery-patterns.md) — remote models, AI.GENERATE_TABLE, Iceberg DDL, BQML
+- [Cross-Platform Patterns](cross-platform-patterns.md) — dialect differences
+- [Cost Optimization](../patterns/cost-optimization.md) — on-demand vs editions
+
+## Sources
+
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-generate
+- https://docs.cloud.google.com/bigquery/docs/generative-ai-overview
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-embed
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-similarity
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-if
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-classify
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-agg
+- https://docs.cloud.google.com/bigquery/docs/choose-text-generation-function
+- https://docs.cloud.google.com/bigquery/docs/release-notes
+- https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions
+- https://docs.cloud.google.com/gemini-enterprise-agent-platform/vertex-ai-name-changes
+- https://docs.cloud.google.com/bigquery/docs/iceberg-tables

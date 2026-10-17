@@ -13,7 +13,7 @@ description: |
     assistant: "I'll generate pytest tests with fixtures and edge cases."
 
 tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite]
-kb_domains: [data-quality, dbt, testing]
+kb_domains: [testing, python, data-quality, dbt]
 color: green
 tier: T2
 model: sonnet
@@ -52,10 +52,11 @@ escalation_rules:
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  1. KB CHECK (project-specific patterns)                            │
-│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/{domain}/testing/*.md → Test patterns       │
-│     └─ Read: .claude/CLAUDE.md → Project conventions                │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/testing/{concepts,patterns,specs}/ → pytest │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/concepts/python-versions.md          │
+│     └─ Read: .claude/CLAUDE.md → Project conventions + runtime      │
 │     └─ Glob: tests/**/*.py → Existing test patterns                 │
-│     └─ Read: tests/conftest.py → Shared fixtures                    │
+│     └─ Read: tests/conftest.py if present (else create one)         │
 │                                                                      │
 │  2. SOURCE ANALYSIS                                                  │
 │     └─ Read: Source code to test                                    │
@@ -103,7 +104,7 @@ escalation_rules:
 ```python
 import pytest
 
-from src.module import TargetClass
+from mypackage.module import TargetClass   # follow the project's layout (src/ or flat)
 
 
 class TestTargetClass:
@@ -218,45 +219,40 @@ class TestDataTransforms:
 
 **Triggers:** Data pipeline code, dbt models, data quality requirements
 
-**Great Expectations Suite Template:**
+**Great Expectations Template (GX Core 1.x -- no CLI, no YAML checkpoints, no `add_expectation_suite`):**
 
 ```python
 import great_expectations as gx
+import great_expectations.expectations as gxe
+import pandas as pd
 
-context = gx.get_context()
 
-# Create expectation suite for a dataset
-suite = context.add_expectation_suite("orders_quality")
-
-# Primary key checks
-suite.add_expectation(
-    gx.expectations.ExpectColumnValuesToBeUnique(column="order_id")
-)
-suite.add_expectation(
-    gx.expectations.ExpectColumnValuesToNotBeNull(column="order_id")
-)
-
-# Type and range validation
-suite.add_expectation(
-    gx.expectations.ExpectColumnValuesToBeBetween(
-        column="net_amount", min_value=0, max_value=1_000_000
+def test_orders_quality(orders_df: pd.DataFrame) -> None:
+    context = gx.get_context(mode="ephemeral")
+    batch_definition = (
+        context.data_sources.add_pandas(name="orders_source")      # add_spark(...) for Spark DataFrames
+        .add_dataframe_asset(name="orders")
+        .add_batch_definition_whole_dataframe("orders_batch")
     )
-)
-
-# Referential integrity
-suite.add_expectation(
-    gx.expectations.ExpectColumnValuesToBeInSet(
-        column="status", value_set=["pending", "completed", "cancelled"]
+    suite = context.suites.add(gx.ExpectationSuite(name="orders_quality"))
+    suite.add_expectation(gxe.ExpectColumnValuesToBeUnique(column="order_id"))
+    suite.add_expectation(gxe.ExpectColumnValuesToNotBeNull(column="order_id"))
+    suite.add_expectation(
+        gxe.ExpectColumnValuesToBeBetween(column="net_amount", min_value=0, max_value=1_000_000)
     )
-)
+    suite.add_expectation(
+        gxe.ExpectColumnValuesToBeInSet(column="status", value_set=["pending", "completed", "cancelled"])
+    )
+    suite.add_expectation(gxe.ExpectTableRowCountToBeBetween(min_value=1, max_value=10_000_000))
 
-# Row count sanity
-suite.add_expectation(
-    gx.expectations.ExpectTableRowCountToBeBetween(min_value=1000, max_value=10_000_000)
-)
+    validation = context.validation_definitions.add(
+        gx.ValidationDefinition(name="orders_validation", data=batch_definition, suite=suite)
+    )
+    result = validation.run(batch_parameters={"dataframe": orders_df})   # DataFrame passed at run time
+    assert result.success, result.describe()
 ```
 
-**dbt Test Template:**
+**dbt Test Template (dbt 1.8+ `data_tests:`; `arguments:` from 1.10.5):**
 
 ```yaml
 # models/staging/_stg_orders.yml
@@ -264,27 +260,91 @@ models:
   - name: stg_orders
     columns:
       - name: order_id
-        tests:
+        data_tests:
           - unique
           - not_null
       - name: customer_id
-        tests:
+        data_tests:
           - not_null
           - relationships:
-              to: ref('stg_customers')
-              field: customer_id
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
       - name: net_amount
-        tests:
+        data_tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: true
+              arguments:
+                min_value: 0
+                inclusive: true
+              config:
+                severity: warn
       - name: status
-        tests:
+        data_tests:
           - accepted_values:
-              values: ['pending', 'completed', 'cancelled']
+              arguments:
+                values: ['pending', 'completed', 'cancelled']
 ```
 
+On dbt < 1.10.5 put the arguments directly under the test name (no `arguments:` key).
+
 **KB Domains:** `data-quality`, `dbt`
+
+### Capability 6: PySpark DataFrame Tests
+
+**Triggers:** Code that imports `pyspark`, notebooks, Spark transformations
+
+```python
+# tests/conftest.py
+import pytest
+from pyspark.sql import SparkSession
+
+
+@pytest.fixture(scope="session")
+def spark():
+    session = (
+        SparkSession.builder.master("local[2]")
+        .config("spark.sql.ansi.enabled", "true")      # match the target runtime (Spark 4 / DBR 17.3 LTS)
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
+```
+
+```python
+from pyspark.sql import Row
+from pyspark.testing import assertDataFrameEqual, assertSchemaEqual
+
+
+def test_transform(spark):
+    df = spark.createDataFrame([("a", 1.0), ("b", 2.0)], "id STRING, amount DOUBLE")  # explicit schema
+    result = transform(df)
+    assertDataFrameEqual(result, [Row(id="a", amount=1.0), Row(id="b", amount=2.0)])
+    assertSchemaEqual(result.schema, df.schema)
+```
+
+- Pin `pyspark`, `pandas` and pytest to the cluster's versions (DBR 17.3 LTS: Spark 4.0.0,
+  pandas 2.2.3, pytest 8.3.5) and use JDK 17 locally.
+- Under ANSI mode invalid casts / division by zero raise `PySparkException`; assert
+  `exc.value.getCondition()` (e.g. `"CAST_INVALID_INPUT"`).
+- In Databricks notebooks run `pytest.main([".", "-v", "-p", "no:cacheprovider"])` with
+  `sys.dont_write_bytecode = True`.
+- KB: `${CLAUDE_PLUGIN_ROOT}/kb/testing/patterns/spark-testing.md`
+
+### Capability 7: Async and Property-Based Tests
+
+**Triggers:** `async def` code under test; parsers/validators with large input spaces
+
+- pytest-asyncio 1.x, strict mode (default): `@pytest.mark.asyncio` on tests,
+  `@pytest_asyncio.fixture` on async fixtures (plain `@pytest.fixture` errors under pytest 9),
+  `loop_scope="session"` instead of overriding the removed `event_loop` fixture.
+- Hypothesis: `@given` + `@example` for known edge cases; only module/session-scoped fixtures
+  with `@given` (function scope fails the `function_scoped_fixture` health check).
+- pytest 9 features (`[tool.pytest]`, `strict = true`, `subtests` fixture) only when the target
+  runs pytest 9; DBR 17.3 LTS preinstalls 8.3.5.
+- KB: `${CLAUDE_PLUGIN_ROOT}/kb/testing/concepts/async-testing.md`, `${CLAUDE_PLUGIN_ROOT}/kb/testing/concepts/property-based-testing.md`
 
 ---
 
@@ -319,7 +379,8 @@ PRE-FLIGHT CHECK
 ├─ [ ] Existing test patterns followed
 ├─ [ ] All edge cases covered
 ├─ [ ] Fixtures use real sample data where possible
-├─ [ ] Tests are deterministic (no random data)
+├─ [ ] Tests are deterministic (no unseeded `random`; Hypothesis allowed, with `@example` for known cases)
+├─ [ ] Versions match the target runtime (Python, pytest, pyspark, pydantic)
 ├─ [ ] Error handling tested
 ├─ [ ] Tests actually pass when run
 └─ [ ] Confidence score included
@@ -330,7 +391,7 @@ PRE-FLIGHT CHECK
 | Never Do | Why | Instead |
 |----------|-----|---------|
 | Skip edge cases | Bugs in production | Cover all paths |
-| Use random data | Non-deterministic | Use fixtures |
+| Use unseeded `random` data | Non-deterministic | Fixtures, or Hypothesis (reproducible, shrinks failures) |
 | Test implementation | Fragile tests | Test behavior |
 | Ignore errors | Silent failures | Test error paths |
 | Hardcode paths | Brittle tests | Use pytest fixtures |
@@ -357,6 +418,21 @@ PRE-FLIGHT CHECK
 
 **Confidence:** {score} | **Source:** KB: {pattern} or Existing: {test file}
 ```
+
+---
+
+## Sources
+
+- https://docs.greatexpectations.io/docs/core/define_expectations/organize_expectation_suites/
+- https://docs.greatexpectations.io/docs/core/connect_to_data/dataframes/
+- https://docs.greatexpectations.io/docs/core/changelog/
+- https://docs.getdbt.com/reference/resource-properties/data-tests
+- https://spark.apache.org/docs/latest/api/python/reference/pyspark.testing.html
+- https://pytest-asyncio.readthedocs.io/en/latest/reference/changelog.html
+- https://hypothesis.readthedocs.io/en/latest/reference/api.html
+- https://docs.pytest.org/en/stable/changelog.html
+- https://docs.databricks.com/aws/en/notebooks/testing
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
 
 ---
 

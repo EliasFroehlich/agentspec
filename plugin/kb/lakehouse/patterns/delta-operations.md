@@ -1,126 +1,151 @@
 # Delta Operations
 
-> **Purpose**: MERGE INTO, OPTIMIZE, VACUUM, change data feed, UniForm, liquid clustering
+> **Purpose**: Production Delta Lake operations — CREATE with liquid clustering, MERGE (with schema evolution), INSERT REPLACE, change data feed, OPTIMIZE/VACUUM vs predictive optimization, time travel, feature management
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
-## Overview
+## When to Use
 
-Core Delta Lake operations for production: upsert with MERGE, optimization with liquid clustering, cleanup with VACUUM, change tracking with Change Data Feed, and cross-format compatibility with UniForm.
+- Upserts and idempotent partial replaces on Delta tables (Databricks or Delta Lake OSS)
+- Incremental downstream processing with change data feed
+- Deciding which maintenance you still run by hand once predictive optimization is on
 
-## The Pattern
+## Implementation
 
 ```sql
--- ============================================================
--- Delta Lake Operations: CRUD → Optimize → Monitor
--- ============================================================
-
--- 1. Create table with liquid clustering + UniForm
-CREATE TABLE catalog.silver.orders (
+-- 1. Create (UC managed): CLUSTER BY AUTO needs predictive optimization; CDF set once at creation
+CREATE TABLE main.silver.orders (
     order_id      STRING NOT NULL,
     customer_id   STRING NOT NULL,
     order_date    DATE NOT NULL,
     total_amount  DECIMAL(12,2),
     status        STRING,
-    region        STRING,
     _updated_at   TIMESTAMP
 )
-USING delta
-CLUSTER BY (region, order_date)
+CLUSTER BY AUTO
 TBLPROPERTIES (
-    'delta.enableDeletionVectors' = 'true',
-    'delta.universalFormat.enabledFormats' = 'iceberg',
-    'delta.enableChangeDataFeed' = 'true',
+    'delta.enableChangeDataFeed' = 'true',            -- legacy CDF; see automatic CDF below
     'delta.logRetentionDuration' = 'interval 30 days',
     'delta.deletedFileRetentionDuration' = 'interval 7 days'
 );
 
--- 2. MERGE INTO (upsert with matched/not-matched)
-MERGE INTO catalog.silver.orders AS target
-USING catalog.bronze.staging_orders AS source
-ON target.order_id = source.order_id
-WHEN MATCHED AND source._updated_at > target._updated_at THEN
-    UPDATE SET *
-WHEN NOT MATCHED THEN
-    INSERT *
-WHEN NOT MATCHED BY SOURCE AND target.order_date < CURRENT_DATE - INTERVAL 90 DAYS THEN
-    DELETE;
+-- 2. MERGE (WHEN NOT MATCHED BY SOURCE and UPDATE SET * EXCEPT: DBR 12.2 LTS+)
+MERGE INTO main.silver.orders AS t
+USING main.bronze.orders_batch AS s
+ON t.order_id = s.order_id
+WHEN MATCHED AND s._updated_at > t._updated_at THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *
+WHEN NOT MATCHED BY SOURCE AND t.order_date < current_date() - INTERVAL 90 DAYS THEN DELETE;
 
--- 3. OPTIMIZE (liquid clustering auto-applies)
-OPTIMIZE catalog.silver.orders;
--- For legacy tables without liquid clustering:
--- OPTIMIZE catalog.silver.orders ZORDER BY (region, order_date);
+-- 2b. Same MERGE, adding new source columns to the target (DBR 15.2+)
+MERGE WITH SCHEMA EVOLUTION INTO main.silver.orders AS t
+USING main.bronze.orders_batch AS s
+ON t.order_id = s.order_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *;
 
--- 4. VACUUM (clean up old files)
-VACUUM catalog.silver.orders RETAIN 168 HOURS;
+-- 3. Atomic partial replace (one commit, unlike DELETE + INSERT)
+INSERT INTO main.gold.daily_sales
+REPLACE WHERE sale_date >= DATE'2026-10-01'          -- DBR 12.2 LTS+
+SELECT * FROM main.silver.daily_sales_v WHERE sale_date >= DATE'2026-10-01';
 
--- 5. Change Data Feed (read changes)
--- Get all changes since version 10
-SELECT * FROM table_changes('catalog.silver.orders', 10)
+INSERT INTO main.gold.daily_sales
+REPLACE USING (sale_date, store_id)                   -- DBR 16.3+; unpartitioned/clustered tables 17.2+
+SELECT * FROM main.silver.daily_sales_recomputed;
+
+-- 4. Change data feed reads
+SELECT _change_type, order_id, total_amount, _commit_version, _commit_timestamp
+FROM table_changes('main.silver.orders', 10, 20)
 WHERE _change_type IN ('insert', 'update_postimage', 'delete');
 
--- Incremental downstream processing
-SELECT
-    _change_type,
-    order_id,
-    customer_id,
-    total_amount,
-    _commit_version,
-    _commit_timestamp
-FROM table_changes('catalog.silver.orders', 10, 20)
-ORDER BY _commit_version;
+-- 5. Maintenance: only when predictive optimization does NOT cover the table
+OPTIMIZE main.silver.orders;                -- incremental clustering
+OPTIMIZE main.silver.orders FULL;           -- after changing clustering keys (DBR 16.4 LTS+)
+VACUUM main.silver.orders;                  -- honors delta.deletedFileRetentionDuration (min 7 days)
+VACUUM main.silver.orders LITE;             -- log-based, faster (DBR 16.4 LTS+ Public Preview)
 
--- 6. Time travel
-SELECT * FROM catalog.silver.orders VERSION AS OF 5;
-SELECT * FROM catalog.silver.orders TIMESTAMP AS OF '2026-03-25';
-RESTORE TABLE catalog.silver.orders TO VERSION AS OF 5;  -- rollback
-
--- 7. DESCRIBE history
-DESCRIBE HISTORY catalog.silver.orders;
+-- 6. Time travel and rollback
+SELECT * FROM main.silver.orders VERSION AS OF 5;
+SELECT * FROM main.silver.orders TIMESTAMP AS OF '2026-10-01';
+RESTORE TABLE main.silver.orders TO VERSION AS OF 5;
+DESCRIBE HISTORY main.silver.orders;
 ```
 
-## Delta 4.x New Operations
+## Delta 4.x and Recent Databricks Operations
 
 ```sql
--- Variant type: flexible semi-structured data
-INSERT INTO catalog.silver.events
-SELECT event_id, PARSE_JSON(raw_payload) AS event_data FROM staging;
+-- Variant (DBR 15.4+ / Delta 4.0+)
+INSERT INTO main.silver.events
+SELECT event_id, parse_json(raw_payload) AS event_data FROM main.bronze.events_raw;
+SELECT event_data:user.name::STRING FROM main.silver.events;
 
--- Query Variant with path extraction
-SELECT event_data:user.name::STRING, event_data:metrics.page_views::INT
-FROM catalog.silver.events;
+-- Type widening (DBR 15.4 LTS+ / Delta 4.0 GA)
+ALTER TABLE main.silver.orders SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
+ALTER TABLE main.silver.orders ALTER COLUMN quantity TYPE BIGINT;
 
--- Type widening: widen column types without data rewrite
-ALTER TABLE catalog.silver.orders SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
-ALTER TABLE catalog.silver.orders ALTER COLUMN quantity TYPE BIGINT;
+-- Enabling deletion vectors no longer blocks concurrent writers (Delta 4.1 conflict-free enablement)
+ALTER TABLE main.silver.orders SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
--- Conflict-free feature enablement (4.1): enable features without blocking writes
-ALTER TABLE catalog.silver.orders SET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
--- No longer blocks concurrent write operations (4.1+)
+-- INSERT with schema evolution (DBR 18.1+; Delta OSS 4.3+), instead of overwriteSchema
+INSERT WITH SCHEMA EVOLUTION INTO main.silver.orders SELECT * FROM main.bronze.orders_batch;
 
--- Identity columns: auto-incrementing surrogate keys
-CREATE TABLE catalog.gold.dim_product (
+-- Identity surrogate key: disables concurrent transactions on the table
+CREATE TABLE main.gold.dim_product (
     product_sk BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
     product_id STRING NOT NULL,
     product_name STRING NOT NULL
-) USING delta;
+);
 ```
 
-## Quick Reference
+## Configuration
 
-| Operation | Command | When to Use |
-|-----------|---------|------------|
-| OPTIMIZE | `OPTIMIZE table` | Daily (or auto-optimize on Databricks) |
-| VACUUM | `VACUUM table RETAIN N HOURS` | Daily, min 7 days retention |
-| CDF query | `table_changes(table, start, end)` | Incremental downstream loads |
-| Time travel | `VERSION AS OF N` | Debug, audit, rollback |
-| RESTORE | `RESTORE TABLE TO VERSION AS OF N` | Emergency rollback |
-| Type widen | `ALTER COLUMN col TYPE wider_type` | Schema evolution (4.0+) |
-| Variant query | `col:path::TYPE` | Semi-structured data (4.0+) |
-| Identity column | `GENERATED ALWAYS AS IDENTITY` | Surrogate keys (4.0+) |
+| Setting | Default | Description |
+|---|---|---|
+| `delta.deletedFileRetentionDuration` | 7 days | VACUUM window; predictive optimization keeps at least 7 days |
+| `delta.logRetentionDuration` | 30 days | Time travel over history |
+| `delta.enableChangeDataFeed` | false | Legacy CDF; set at creation (changing properties later conflicts with concurrent writes) |
+| Automatic CDF | — | DBR 19+, UC-registered tables with row tracking (Delta) or Iceberg v3; no table property; Databricks readers only; cannot coexist with legacy CDF |
+| Predictive optimization | Account default | Runs OPTIMIZE, VACUUM, ANALYZE on UC managed tables; never runs ZORDER |
 
-## Related
+## Example Usage
+
+| Operation | Command | When |
+|---|---|---|
+| Upsert | `MERGE INTO ... WHEN MATCHED / NOT MATCHED / NOT MATCHED BY SOURCE` | Silver dedup/upsert |
+| Partial replace | `INSERT INTO ... REPLACE WHERE / USING / ON` (`REPLACE ON` DBR 17.1+) | Recompute a slice atomically |
+| Schema change | `ALTER TABLE ADD COLUMN`, type widening, `MERGE/INSERT WITH SCHEMA EVOLUTION` | Never `overwriteSchema` on shared tables |
+| Maintenance | Nothing on UC managed + predictive optimization; else scheduled `OPTIMIZE`/`VACUUM` | External or legacy tables |
+| Remove a feature | `ALTER TABLE t DROP FEATURE <feature>` (DBR 16.3+) | Restore compatibility with older clients |
+
+```python
+# Wrong: replaces the schema and partitioning under every consumer in one commit; streaming
+# readers of the table fail on the schema change; column comments not carried by the
+# DataFrame (e.g. on a recomputed column) are lost.
+df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("main.gold.orders")
+
+# Correct: change the schema explicitly (DDL), then write with the table's schema.
+spark.sql("ALTER TABLE main.gold.orders ADD COLUMN channel STRING")
+df.write.mode("overwrite").saveAsTable("main.gold.orders")
+```
+
+## See Also
 
 - [delta-lake concept](../concepts/delta-lake.md)
+- [liquid-clustering concept](../concepts/liquid-clustering.md)
 - [iceberg-operations](iceberg-operations.md)
 - [migration-to-open-formats](migration-to-open-formats.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/delta-merge-into
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-dml-insert-into
+- https://docs.databricks.com/aws/en/tables/update-schema
+- https://docs.databricks.com/aws/en/tables/features/change-data-feed
+- https://docs.databricks.com/aws/en/tables/table-properties
+- https://docs.databricks.com/aws/en/tables/operations/vacuum
+- https://docs.databricks.com/aws/en/tables/clustering
+- https://docs.databricks.com/aws/en/optimizations/predictive-optimization
+- https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/structured-streaming/delta-lake
+- https://docs.delta.io/delta-batch/
+- https://github.com/delta-io/delta/releases/tag/v4.1.0

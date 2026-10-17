@@ -2,11 +2,11 @@
 
 > **Purpose**: Choose the right incremental materialization strategy for your data shape
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26 | Updated with microbatch strategy (v1.9+)
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Incremental models process only new or changed data instead of rebuilding entire tables. dbt supports five strategies: **append** (insert-only), **merge** (upsert), **delete+insert** (replace matching rows), **insert_overwrite** (replace partitions), and **microbatch** (v1.9+, time-partitioned batch processing). Strategy selection depends on data mutability, volume, and warehouse capabilities.
+Incremental models process only new or changed data instead of rebuilding entire tables. dbt supports five strategies: **append** (insert-only), **merge** (upsert), **delete+insert** (replace matching rows), **insert_overwrite** (replace partitions), and **microbatch** (v1.9+, time-partitioned batch processing). Adapters add their own — `dbt-databricks` adds **replace_where**. Which strategies exist, and which is the default, depends on the adapter (`merge` on dbt-databricks). Strategy selection depends on data mutability, volume, and platform capabilities.
 
 ## The Concept
 
@@ -39,15 +39,17 @@ from {{ ref('stg_orders') }}
 
 ```sql
 -- Microbatch: dbt runs separate queries for each time batch
--- No is_incremental() logic needed — dbt handles it automatically
+-- No is_incremental() logic — dbt filters every upstream that has event_time configured
+-- event_time (required): time column used to batch; begin (required): earliest data;
+-- batch_size (required): hour | day | month | year; lookback (default 1): batches re-processed for late data
 {{
     config(
         materialized='incremental',
         incremental_strategy='microbatch',
-        event_time='event_timestamp',   -- required: time column for batching
-        begin='2024-01-01',             -- earliest data to process
-        batch_size='day',               -- hour, day, or month
-        lookback=1                      -- re-process N previous batches for late data
+        event_time='event_timestamp',
+        begin='2024-01-01',
+        batch_size='day',
+        lookback=1
     )
 }}
 
@@ -57,19 +59,28 @@ select
     event_type,
     event_timestamp,
     properties
-from {{ ref('stg_events') }}
--- No is_incremental() block needed — microbatch handles time filtering
+from {{ ref('stg_events') }}                  -- stg_events must also set event_time,
+                                               -- or every batch scans it in full
 ```
+
+Use `ref('dim_users').render()` to opt a ref out of batch filtering (for example, a small dimension).
+
+Backfill a window with `dbt run --select fct_events --event-time-start "2026-01-01" --event-time-end "2026-02-01"`
+(both flags together).
 
 ## Quick Reference
 
 | Strategy | Mutability | Unique Key | Best Warehouse | Volume Threshold |
 |----------|-----------|------------|---------------|-----------------|
 | `append` | Immutable events | Not needed | Any | Any |
-| `merge` | Mutable rows | Required | Snowflake, BigQuery | < 100M rows |
-| `delete+insert` | Mutable rows | Required | Redshift, Postgres | > 100M rows |
-| `insert_overwrite` | Partition-level | Partition key | BigQuery, Spark | Any (partition) |
-| `microbatch` | Time-series | `event_time` col | Any (v1.9+) | Any |
+| `merge` | Mutable rows | Required | Snowflake, BigQuery, Databricks (default) | < 100M rows |
+| `delete+insert` | Mutable rows | Required | Redshift, Postgres; Databricks 1.11+ | > 100M rows |
+| `insert_overwrite` | Partition-level | Partition key | BigQuery, Spark/Databricks (needs `partition_by` or `liquid_clustered_by`) | Any (partition) |
+| `replace_where` | Predicate-defined slice | Not needed (`incremental_predicates`) | Databricks only | Any |
+| `microbatch` | Time-series | `event_time` col (model + upstreams) | Any (v1.9+); Databricks via `replace_where` | Any |
+
+`unique_key` matters only for `merge` and `delete+insert`; `append`, `insert_overwrite`, `replace_where`
+and `microbatch` ignore it.
 
 ### Microbatch vs Traditional Incremental
 
@@ -79,7 +90,7 @@ from {{ ref('stg_events') }}
 | User responsibility | Write `is_incremental()` logic | No conditional logic needed |
 | Backfill | `--full-refresh` (rebuilds all) | Automatic per-batch backfill |
 | Late-arriving data | Manual lookback window | `lookback` parameter |
-| Batch granularity | User-defined | `hour`, `day`, or `month` |
+| Batch granularity | User-defined | `hour`, `day`, `month` or `year` |
 | Retry on failure | Reruns all new data | Retries only the failed batch |
 
 ## Common Mistakes
@@ -111,3 +122,12 @@ select * from {{ ref('stg_events') }}
 
 - [model-types](../concepts/model-types.md)
 - [incremental-model](../patterns/incremental-model.md)
+- [dbt-databricks-adapter](dbt-databricks-adapter.md)
+
+## Sources
+
+- https://docs.getdbt.com/docs/build/incremental-strategy
+- https://docs.getdbt.com/docs/build/incremental-microbatch
+- https://docs.getdbt.com/reference/resource-configs/batch-size
+- https://docs.getdbt.com/reference/resource-configs/event-time
+- https://docs.getdbt.com/reference/resource-configs/databricks-configs

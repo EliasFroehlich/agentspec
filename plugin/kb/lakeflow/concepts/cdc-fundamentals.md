@@ -1,122 +1,116 @@
 # CDC Fundamentals
 
-> **Purpose**: Change Data Capture processing with APPLY CHANGES in Lakeflow pipelines
+> **Purpose**: Change data capture with the AUTO CDC APIs (formerly APPLY CHANGES) in Lakeflow pipelines
 > **Confidence**: High
-> **Source**: https://docs.databricks.com/aws/en/dlt/cdc
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Change Data Capture (CDC) in Lakeflow processes incremental changes from source systems, enabling efficient data synchronization without full reloads. The `APPLY CHANGES` API (also called AUTO CDC) handles insert, update, and delete operations, supporting both SCD Type 1 (current state) and SCD Type 2 (historical tracking) patterns.
+The `AUTO CDC` APIs replace the `APPLY CHANGES` APIs with the same syntax; `APPLY CHANGES` still
+works but Databricks recommends `AUTO CDC`. Two APIs exist, both in SQL and Python:
+`AUTO CDC` for a change data feed, and `AUTO CDC FROM SNAPSHOT` for full snapshots. Both support SCD
+Type 1 and Type 2; `AUTO CDC` also supports bitemporal storage (Beta). Requires serverless pipelines
+or the `Pro`/`Advanced` edition. Not available in open-source Spark Declarative Pipelines beyond the
+SCD Type 1 Auto CDC added in Spark 4.2.
 
 ## The Concept
 
-### CDC APIs
-
-Lakeflow provides two CDC approaches:
-
-1. **AUTO CDC** — processes changes from a change data feed (CDF) where each record represents an operation (insert/update/delete)
-2. **AUTO CDC FROM SNAPSHOT** — processes periodic full snapshots and computes the diff automatically (Python only, Public Preview)
-
-### SCD Type 1 (Current State)
-
-Records are updated in place. No history is retained.
-
 ```python
-import dlt
-from pyspark.sql.functions import col
+from pyspark import pipelines as dp
+from pyspark.sql.functions import col, expr
 
-dlt.create_auto_cdc_flow(
+dp.create_streaming_table("customers")       # target must be a streaming table
+
+dp.create_auto_cdc_flow(
     target="customers",
-    source="customers_cdc_stream",
+    source="customers_cdc_feed",             # streaming source
     keys=["customer_id"],
-    sequence_by=col("timestamp"),
-    stored_as_scd_type=1
+    sequence_by=col("event_ts"),             # required, sortable; struct() to break ties
+    apply_as_deletes=expr("op = 'DELETE'"),
+    apply_as_truncates=expr("op = 'TRUNCATE'"),  # SCD Type 1 only
+    except_column_list=["op", "event_ts"],
+    stored_as_scd_type=1,                    # default 1; "2" or "bitemporal" (Beta)
 )
 ```
 
 ```sql
-CREATE OR REFRESH STREAMING TABLE customers;
+CREATE OR REFRESH STREAMING TABLE customers_history;
 
-APPLY CHANGES INTO customers
-FROM STREAM customers_cdc
+CREATE FLOW customers_history_cdc AS AUTO CDC INTO customers_history
+FROM STREAM(customers_cdc_feed)
 KEYS (customer_id)
-SEQUENCE BY timestamp
-COLUMNS * EXCEPT (operation, timestamp)
-STORED AS SCD TYPE 1
-```
-
-### SCD Type 2 (Historical Tracking)
-
-Previous versions are retained with `__START_AT` and `__END_AT` columns.
-
-```sql
-CREATE OR REFRESH STREAMING TABLE customers;
-
-APPLY CHANGES INTO customers
-FROM STREAM customers_cdc
-KEYS (customer_id)
-SEQUENCE BY timestamp
-COLUMNS * EXCEPT (operation, timestamp)
+APPLY AS DELETE WHEN op = 'DELETE'
+SEQUENCE BY event_ts
+COLUMNS * EXCEPT (op, event_ts)
 STORED AS SCD TYPE 2
-```
-
-### Handling Deletes
-
-```python
-dlt.create_auto_cdc_flow(
-    target="customers",
-    source="customers_cdc_stream",
-    keys=["customer_id"],
-    sequence_by=col("timestamp"),
-    apply_as_deletes=expr("operation = 'DELETE'"),
-    stored_as_scd_type=1
-)
+TRACK HISTORY ON * EXCEPT (last_login);
 ```
 
 ## Quick Reference
 
-| SCD Type | History | Columns Added | Use Case |
-|----------|---------|---------------|----------|
-| Type 1 | No | None | Current state, dashboards |
-| Type 2 | Yes | `__START_AT`, `__END_AT` | Audit trails, temporal queries |
+| SCD type | History | System columns | Current row |
+|----------|---------|----------------|-------------|
+| Type 1 | No | none | the row itself |
+| Type 2 | Yes | `__START_AT`, `__END_AT` | `__END_AT IS NULL` |
+| Bitemporal (Beta) | Business + system time | needs `system_sequence_by` | - |
 
-| Parameter | Purpose | Required |
-|-----------|---------|----------|
-| `target` | Destination table name | Yes |
-| `source` | Source stream or table | Yes |
-| `keys` | Business key columns | Yes |
-| `sequence_by` | Ordering column for dedup | Yes |
-| `apply_as_deletes` | Expression identifying deletes | No |
-| `stored_as_scd_type` | 1 or 2 | No (default: 1) |
+| Parameter (Python / SQL) | Purpose |
+|--------------------------|---------|
+| `keys` / `KEYS` | Row identity (required) |
+| `sequence_by` / `SEQUENCE BY` | Event order (required, non-null, sortable) |
+| `apply_as_deletes` / `APPLY AS DELETE WHEN` | Delete condition (tombstones kept 2 days by default) |
+| `apply_as_truncates` / `APPLY AS TRUNCATE WHEN` | Full truncate, SCD Type 1 only |
+| `ignore_null_updates` / `IGNORE NULL UPDATES` | Keep existing value when incoming is null |
+| `columns_to_update` / `COLUMNS TO UPDATE` | Per-record column list (`array<string>`) |
+| `column_list`, `except_column_list` / `COLUMNS` | Columns kept in the target |
+| `track_history_column_list` / `TRACK HISTORY ON` | Columns that open a new SCD2 version |
+| `name` / flow name | Several AUTO CDC flows into one target (2025.30+) |
+| `once=True` / `AUTO CDC ONCE` | One-time backfill flow |
+
+Explicit target schema for SCD Type 2 must include `__START_AT` and `__END_AT` with the same type as
+`sequence_by`. Tombstone retention: table property `pipelines.cdc.tombstoneGCThresholdInSeconds`.
+
+### Snapshots
+
+`dp.create_auto_cdc_from_snapshot_flow(target, source, keys, stored_as_scd_type, ..., once)` or SQL
+`CREATE FLOW f AS AUTO CDC INTO t FROM SNAPSHOT (query) [WITH VERSION (query)] KEYS (...)`. Keys absent
+from a newer snapshot are deleted. Expectations are not supported on snapshot flows. For SCD Type 1 in
+triggered pipelines, one snapshot flow can share a target with one or more `AUTO CDC` flows.
 
 ## Common Mistakes
 
 ### Wrong
 
 ```python
-# Missing sequence_by causes non-deterministic ordering
-dlt.create_auto_cdc_flow(
-    target="orders",
-    source="orders_cdc",
-    keys=["order_id"]
-    # No sequence_by — which update wins?
-)
+dp.create_auto_cdc_flow(target="orders", source="orders_cdc", keys=["order_id"])
+# missing sequence_by: out-of-order events cannot be resolved (and it is required)
 ```
 
 ### Correct
 
 ```python
-# Always specify sequence_by for deterministic deduplication
-dlt.create_auto_cdc_flow(
-    target="orders",
-    source="orders_cdc",
-    keys=["order_id"],
-    sequence_by=col("updated_at")
+dp.create_auto_cdc_flow(
+    target="orders", source="orders_cdc",
+    keys=["order_id"], sequence_by=col("updated_at"),
 )
 ```
 
+Also wrong: filtering SCD Type 2 with a `__IS_CURRENT` column (it does not exist; use
+`__END_AT IS NULL`) and identity columns on an AUTO CDC target (not supported).
+
 ## Related
 
-- [Core Concepts](../concepts/core-concepts.md)
-- [CDC Apply Changes Pattern](../patterns/cdc-apply-changes.md)
-- [CDC Example](../patterns/cdc-example.md)
+- [AUTO CDC pattern](../patterns/cdc-apply-changes.md)
+- [CDC example](../patterns/cdc-example.md)
+- [Core concepts](core-concepts.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/cdc
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes-from-snapshot
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-apply-changes-into
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-create-flow
+- https://docs.databricks.com/aws/en/ldp/limitations
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/30/
+- https://spark.apache.org/releases/spark-release-4-2-0.html

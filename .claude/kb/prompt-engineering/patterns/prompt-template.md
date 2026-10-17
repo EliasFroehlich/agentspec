@@ -1,196 +1,148 @@
 # Reusable Prompt Templates
 
-> **Purpose**: Production-ready, composable prompt templates for common LLM tasks with Python integration
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Versioned, provider-neutral prompt templates that render to the Claude Messages API or the OpenAI Responses API, plus managed versioning with MLflow Prompt Registry
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Building prompt libraries for teams
-- Standardizing prompt structure across projects
-- Creating version-controlled, testable prompts
-- Any project with multiple prompt types
+- Building a shared prompt library for a team
+- Keeping prompts version-controlled, testable and comparable across releases
+- Running the same prompt on more than one provider
+- Not as a place to hide per-request data: dynamic values go in the user turn, not the system text
 
 ## Implementation
 
 ```python
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
-from string import Template
-import json
+from typing import Any, Optional
 
+from pydantic import BaseModel
 
-@dataclass
+@dataclass(frozen=True)
 class PromptTemplate:
-    """Reusable, composable prompt template."""
-
+    """Provider-neutral template. Sampling parameters are deliberately absent: current Claude
+    models reject temperature/top_p/top_k, so behavior is controlled by the prompt, the output
+    schema and effort/reasoning settings."""
     name: str
     version: str
-    system: str
-    user: str
-    temperature: float = 0.0
-    model: str = "gpt-4o"
-    response_format: Optional[str] = "json_object"
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    system: str                                  # stable text, safe to cache
+    user: str                                    # str.format placeholders for per-request data
+    output_schema: Optional[type[BaseModel]] = None
+    effort: str = "medium"                       # Claude output_config.effort / OpenAI reasoning.effort
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def render(self, **kwargs) -> Dict[str, Any]:
-        """Render the template with variables."""
-        return {
-            "model": self.model,
-            "temperature": self.temperature,
-            "messages": [
-                {"role": "system", "content": self.system.format(**kwargs)},
-                {"role": "user", "content": self.user.format(**kwargs)},
-            ],
-            "response_format": {"type": self.response_format}
-            if self.response_format else None,
+    def render_anthropic(self, model: str, **kw) -> dict[str, Any]:
+        """kwargs for client.messages.parse (schema) or client.messages.create (free text)."""
+        params: dict[str, Any] = {
+            "model": model, "max_tokens": 16000,
+            "system": [{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": self.user.format(**kw)}],
         }
+        if self.output_schema:
+            params["output_format"] = self.output_schema          # use with messages.parse
+        else:
+            params["output_config"] = {"effort": self.effort}
+        return params
 
-    def to_dict(self) -> dict:
-        """Serialize template for storage."""
-        return {
-            "name": self.name,
-            "version": self.version,
-            "system": self.system,
-            "user": self.user,
-            "temperature": self.temperature,
-            "model": self.model,
-            "response_format": self.response_format,
-            "metadata": self.metadata,
+    def render_openai(self, model: str, **kw) -> dict[str, Any]:
+        """kwargs for client.responses.parse (schema) or client.responses.create (free text)."""
+        params: dict[str, Any] = {
+            "model": model, "instructions": self.system,
+            "input": self.user.format(**kw), "reasoning": {"effort": self.effort},
         }
+        if self.output_schema:
+            params["text_format"] = self.output_schema           # use with responses.parse
+        return params
 
+# --- Pre-built templates ---
 
-# --- Pre-Built Templates ---
+class Classification(BaseModel):
+    category: str
+    confidence: float
+    evidence: str                 # quote from the text that supports the label
 
-EXTRACTION_TEMPLATE = PromptTemplate(
-    name="document-extraction",
-    version="1.0.0",
-    system="""You are a precise data extraction system.
-Extract ONLY data present in the document. Use null for missing fields.
-Dates: ISO 8601. Amounts: numeric only. Always return valid JSON.""",
-    user="""## Schema
-{schema}
-
-## Document
-{document}
-
-Extract all fields matching the schema. Return JSON only.""",
-    temperature=0.0,
+EXTRACTION = PromptTemplate(
+    name="document-extraction", version="2.0.0",
+    system=("You extract data for an automated ledger. Use only values present in the document and "
+            "leave fields null when absent, because guessed values break reconciliation."),
+    user="<document>\n{document}\n</document>\n\nExtract the fields.",
 )
 
-CLASSIFICATION_TEMPLATE = PromptTemplate(
-    name="text-classification",
-    version="1.0.0",
-    system="""You are a text classification system.
-Classify the input into exactly one of the provided categories.
-Return JSON with: category, confidence (0-1), reasoning.""",
-    user="""## Categories
-{categories}
-
-## Text
-{text}
-
-Classify this text. Return JSON only.""",
-    temperature=0.0,
+CLASSIFICATION = PromptTemplate(
+    name="text-classification", version="2.0.0",
+    system="You route support messages to exactly one queue.",
+    user="<categories>\n{categories}\n</categories>\n\n<text>\n{text}\n</text>",
+    output_schema=Classification, effort="low",
 )
 
-SUMMARIZATION_TEMPLATE = PromptTemplate(
-    name="document-summarization",
-    version="1.0.0",
-    system="""You are a document summarization expert.
-Produce concise, accurate summaries. Never add information not in the source.""",
-    user="""## Instructions
-Summarize the following document in {max_sentences} sentences.
-Focus on: {focus_areas}
-
-## Document
-{document}
-
-Return JSON: {{"summary": "...", "key_points": ["..."], "word_count": N}}""",
-    temperature=0.3,
+QA = PromptTemplate(
+    name="question-answering", version="2.0.0",
+    system=("Answer only from the provided context. If the context does not contain the answer, "
+            "say so — users act on these answers."),
+    user="<context>\n{context}\n</context>\n\n<question>{question}</question>",
 )
 
-QA_TEMPLATE = PromptTemplate(
-    name="question-answering",
-    version="1.0.0",
-    system="""You are a question-answering system.
-Answer based ONLY on the provided context. If the answer is not in the context,
-say so explicitly. Never fabricate information.""",
-    user="""## Context
-{context}
-
-## Question
-{question}
-
-Return JSON: {{"answer": "...", "confidence": 0.0-1.0, "evidence": "quote"}}""",
-    temperature=0.0,
-)
-
-
-# --- Template Registry ---
+# --- Local registry (use MLflow Prompt Registry when available) ---
 
 class PromptRegistry:
-    """Manage and version prompt templates."""
+    def __init__(self) -> None:
+        self._templates: dict[tuple[str, str], PromptTemplate] = {}
 
-    def __init__(self):
-        self._templates: Dict[str, PromptTemplate] = {}
-
-    def register(self, template: PromptTemplate) -> None:
-        key = f"{template.name}@{template.version}"
-        self._templates[key] = template
+    def register(self, t: PromptTemplate) -> None:
+        self._templates[(t.name, t.version)] = t
 
     def get(self, name: str, version: str = "latest") -> PromptTemplate:
-        if version == "latest":
-            matches = [
-                (k, t) for k, t in self._templates.items()
-                if k.startswith(f"{name}@")
-            ]
-            if not matches:
-                raise KeyError(f"Template '{name}' not found")
-            return sorted(matches, key=lambda x: x[0])[-1][1]
-        key = f"{name}@{version}"
-        if key not in self._templates:
-            raise KeyError(f"Template '{key}' not found")
-        return self._templates[key]
-
-    def list_templates(self) -> List[str]:
-        return list(self._templates.keys())
-
-
-# --- Usage ---
+        versions = sorted((v for n, v in self._templates if n == name),
+                          key=lambda v: tuple(int(x) for x in v.split(".")))
+        if not versions:
+            raise KeyError(name)
+        return self._templates[(name, versions[-1] if version == "latest" else version)]
 
 registry = PromptRegistry()
-registry.register(EXTRACTION_TEMPLATE)
-registry.register(CLASSIFICATION_TEMPLATE)
-registry.register(SUMMARIZATION_TEMPLATE)
-registry.register(QA_TEMPLATE)
+for t in (EXTRACTION, CLASSIFICATION, QA):
+    registry.register(t)
 ```
+
+## Managed Versioning: MLflow Prompt Registry
+
+```python
+import mlflow
+
+prompt = mlflow.genai.register_prompt(          # template variables use double braces
+    name="support-qa",
+    template="Answer only from the context.\n<context>{{context}}</context>\n<question>{{question}}</question>",
+    commit_message="v2: cite context only",
+)
+mlflow.genai.set_prompt_alias(name="support-qa", alias="production", version=prompt.version)
+
+loaded = mlflow.genai.load_prompt("prompts:/support-qa@production")
+user_text = loaded.format(context=ctx, question=q)
+```
+
+Databricks exposes the same API as a managed service (MLflow Prompt Registry); see its docs for naming and permissions.
 
 ## Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `temperature` | Per-template | Extraction=0.0, Creative=0.7 |
-| `model` | `gpt-4o` | Override per template |
-| `response_format` | `json_object` | Set to None for free-text |
-| `version` | `1.0.0` | Semantic versioning |
+| `version` | semantic version | Bump on any wording change; evaluate before promoting |
+| `effort` | `medium` | Per template; `low` for routing/classification |
+| `output_schema` | `None` | Pydantic model enforced by the API when set |
+| Sampling | none | Not sent; OpenAI `temperature` can be added per call where the model supports it |
 
 ## Example Usage
 
 ```python
+import anthropic
+
+t = registry.get("text-classification")
+resp = anthropic.Anthropic().messages.parse(
+    **t.render_anthropic("claude-haiku-5-5", categories="billing\ntechnical\nother", text=msg))
+print(resp.parsed_output)
+
 from openai import OpenAI
-
-client = OpenAI()
-
-# Get and render a template
-template = registry.get("document-extraction")
-params = template.render(
-    schema='{"invoice_number": "string", "total": "float"}',
-    document="Invoice #123, Total: $500.00"
-)
-
-# Call the API
-response = client.chat.completions.create(**params)
-print(response.choices[0].message.content)
+resp = OpenAI().responses.parse(**t.render_openai("gpt-6-luna", categories="billing\ntechnical\nother", text=msg))
+print(resp.output_parsed)
 ```
 
 ## See Also
@@ -198,3 +150,12 @@ print(response.choices[0].message.content)
 - [System Prompts](../concepts/system-prompts.md)
 - [Few-Shot Prompting](../concepts/few-shot-prompting.md)
 - [Document Extraction](../patterns/document-extraction.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+- https://platform.openai.com/docs/guides/structured-outputs
+- https://developers.openai.com/api/docs/guides/code-generation
+- https://mlflow.org/docs/latest/genai/prompt-registry/
+- https://docs.databricks.com/aws/en/mlflow3/genai/prompt-version-mgmt/prompt-registry/

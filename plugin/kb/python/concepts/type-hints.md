@@ -1,205 +1,150 @@
 # Type Hints
 
-> **Purpose**: Type annotations, generics, Self, TypeIs, TypeForm, and Python 3.12-3.14 syntax
+> **Purpose**: Type annotations that run on Python 3.12+ -- unions, Self, PEP 695 generics, TypedDict, Protocol, narrowing
 > **Confidence**: 0.95
-> **MCP Validated:** 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Python type hints enable static analysis, IDE support, and documentation without runtime
-overhead. Python 3.10+ introduced `X | Y` union syntax, 3.11 added `Self` and
-`LiteralString`, 3.12 introduced the `type` statement and native generic syntax,
-3.13 added `TypeIs` and `TypeForm`, and 3.14 brings deferred annotation evaluation.
+Type hints let a type checker (mypy, pyright, ty) catch bugs before runtime. Everything here runs on
+**3.12** (Databricks Runtime 17.3 LTS); 3.13+ typing features (`TypeIs`, `ReadOnly`, deferred
+annotations, `TypeForm`, TypedDict `extra_items`) and their backports are in [Python Versions](python-versions.md).
 
-## The Pattern
+## The Concept
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Self
 
 
 @dataclass(slots=True)
 class TreeNode:
     value: int
-    children: list[Self] | None = None
+    children: list[Self] = field(default_factory=list)
 
     def add_child(self, value: int) -> Self:
-        if self.children is None:
-            self.children = []
-        child = TreeNode(value=value)
+        child = type(self)(value=value)   # not TreeNode(...): keeps subclasses typed correctly
         self.children.append(child)
         return child
 ```
 
 ## Modern Syntax Reference
 
-| Old (pre-3.10) | Modern (3.10+) | Version |
-|-----------------|----------------|---------|
-| `Optional[str]` | `str \| None` | 3.10+ |
-| `Union[int, str]` | `int \| str` | 3.10+ |
-| `List[int]` | `list[int]` | 3.9+ |
-| `Dict[str, int]` | `dict[str, int]` | 3.9+ |
-| `Tuple[int, ...]` | `tuple[int, ...]` | 3.9+ |
+| Old | Modern | Since |
+|-----|--------|-------|
+| `Optional[str]` | `str \| None` | 3.10 |
+| `Union[int, str]` | `int \| str` | 3.10 |
+| `List[int]`, `Dict[str, int]`, `Tuple[int, ...]` | `list[int]`, `dict[str, int]`, `tuple[int, ...]` | 3.9 |
+| `T = TypeVar("T")` + `Generic[T]` | `def f[T](x: T) -> T` / `class Box[T]:` | 3.12 |
+| `Vector: TypeAlias = list[float]` | `type Vector = list[float]` | 3.12 |
+| `from typing import Callable, Iterator` | `from collections.abc import Callable, Iterator` | 3.9 |
 
-## Python 3.11+ Features
+## Python 3.11 Features
 
 ```python
-from typing import Self, LiteralString, Never
+from typing import LiteralString, Never, Self
 
-# Self: annotate methods returning their own class
+
 class Builder:
-    def set_name(self, name: str) -> Self:
+    def set_name(self, name: str) -> Self:   # subclasses keep their own type
         self.name = name
         return self
 
-# LiteralString: must be a literal, not arbitrary string
-def run_query(sql: LiteralString) -> list[dict]: ...
 
-# Never: function that never returns
-def fail(msg: str) -> Never:
+def run_query(sql: LiteralString) -> list[dict]: ...   # rejects f-strings built from user input
+def fail(msg: str) -> Never:                             # function never returns
     raise RuntimeError(msg)
 ```
 
-## Python 3.12+ Generics
+## Python 3.12 Generics (PEP 695)
 
 ```python
-# OLD: verbose TypeVar boilerplate
-from typing import TypeVar
-T = TypeVar("T")
-def first_old(items: list[T]) -> T:
-    return items[0]
+from collections.abc import Callable
 
-# NEW: native generic syntax (3.12+)
+
 def first[T](items: list[T]) -> T:
     return items[0]
 
-# NEW: type alias statement (3.12+)
+
+class Box[T]:
+    def __init__(self, item: T) -> None:
+        self.item = item
+
+
 type Vector = list[float]
-type Callback[T] = Callable[[T], None]
+type Callback[T] = Callable[[T], None]   # alias body is evaluated lazily
 ```
 
-## TypedDict for Structured Dicts
+## TypedDict and Protocol
 
 ```python
-from typing import TypedDict, Required, NotRequired
+from typing import NotRequired, Protocol, TypedDict, runtime_checkable
+
 
 class APIResponse(TypedDict):
-    status: Required[int]
-    data: Required[dict]
-    error: NotRequired[str]
+    status: int
+    data: dict[str, object]
+    error: NotRequired[str]          # key may be absent
+
+
+@runtime_checkable
+class Serializable(Protocol):        # structural typing: any class with to_dict() matches
+    def to_dict(self) -> dict[str, object]: ...
+```
+
+## Type Narrowing with TypeIs (3.13+, typing_extensions on 3.12)
+
+```python
+from typing_extensions import TypeIs   # `from typing import TypeIs` on 3.13+
+
+
+def is_str(val: int | str) -> TypeIs[str]:   # narrowed type must be a subtype of the input
+    return isinstance(val, str)
+
+
+def describe(val: int | str) -> str:
+    if is_str(val):
+        return val.upper()           # narrowed to str
+    return str(val + 1)              # narrowed to int in the else branch (TypeGuard cannot)
 ```
 
 ## Common Mistakes
 
-### Wrong (legacy imports)
+### Wrong
 
 ```python
-from typing import Optional, List, Dict, Union
+from typing import Dict, List, Optional, Union
+
 def process(items: Optional[List[Dict[str, Union[int, str]]]]) -> None: ...
 ```
 
-### Correct (modern syntax)
+### Correct
 
 ```python
 def process(items: list[dict[str, int | str]] | None) -> None: ...
 ```
 
-## Protocols (Structural Typing)
-
-```python
-from typing import Protocol, runtime_checkable
-
-@runtime_checkable
-class Serializable(Protocol):
-    def to_dict(self) -> dict: ...
-    def to_json(self) -> str: ...
-
-def save(obj: Serializable) -> None:
-    data = obj.to_dict()
-    ...
-```
-
-## Python 3.13+ TypeIs (PEP 742)
-
-```python
-from typing import TypeIs
-
-# TypeIs narrows types in BOTH if and else branches
-# (TypeGuard only narrowed the if branch)
-def is_str_list(val: list[int | str]) -> TypeIs[list[str]]:
-    return all(isinstance(x, str) for x in val)
-
-def process(items: list[int | str]) -> None:
-    if is_str_list(items):
-        # Type checker knows: items is list[str]
-        print(items[0].upper())
-    else:
-        # Type checker knows: items is list[int | str] (not narrowed away)
-        pass
-```
-
-## Python 3.13+ TypeForm (PEP 747)
-
-```python
-from typing import TypeForm
-
-# TypeForm lets you annotate type objects passed as values
-def validate(data: object, expected: TypeForm) -> bool:
-    return isinstance(data, expected)
-
-validate("hello", str)    # OK
-validate(42, int)          # OK
-```
-
-## Python 3.14+ Deferred Annotations (PEP 649)
-
-```python
-# In 3.14+, annotations are evaluated lazily by default.
-# No more need for `from __future__ import annotations`.
-# Forward references just work:
-class Tree:
-    left: Tree | None = None   # No quotes needed
-    right: Tree | None = None
-
-# Access annotations programmatically:
-import annotationlib
-annotations = annotationlib.get_annotations(Tree)
-```
-
-## Python 3.14+ Template Strings (PEP 750)
-
-```python
-from string.templatelib import Template
-
-# t-strings create Template objects instead of strings
-name = "world"
-template: Template = t"Hello {name}"
-
-# Templates give access to parts before rendering
-# Useful for SQL injection prevention, HTML escaping, i18n
-def safe_sql(template: Template) -> str:
-    # Sanitize interpolated values before combining
-    ...
-```
-
 ## Quick Reference
 
-| Type | Use Case | Version |
-|------|----------|---------|
-| `str \| None` | Optional value | 3.10+ |
-| `Self` | Method returns own class | 3.11+ |
-| `Never` | Function never returns | 3.11+ |
-| `LiteralString` | SQL injection prevention | 3.11+ |
-| `Literal["a", "b"]` | Enum-like string constraint | 3.8+ |
-| `Protocol` | Structural subtyping (duck typing) | 3.8+ |
-| `Annotated[int, Gt(0)]` | Type with metadata | 3.9+ |
-| `TypeIs` | Narrow types in both branches | 3.13+ |
-| `TypeForm` | Annotate type objects as values | 3.13+ |
-| `type X = ...` | Type alias statement | 3.12+ |
-| `def fn[T](x: T)` | Native generic syntax | 3.12+ |
+| Type | Use Case | Since |
+|------|----------|-------|
+| `str \| None` | Optional value | 3.10 |
+| `Self` / `Never` / `LiteralString` | Fluent APIs / no-return / SQL safety | 3.11 |
+| `def fn[T](x: T)`, `type X = ...` | Generics and aliases | 3.12 |
+| `Annotated[int, Gt(0)]` / `Protocol` | Metadata for validators / structural subtyping | 3.9 / 3.8 |
+| `TypeIs` / `ReadOnly` | Narrowing / read-only TypedDict keys | 3.13 (typing_extensions on 3.12) |
+| `TypeForm` | Annotate type expressions passed as values | 3.15 (typing_extensions 4.13+) |
 
 ## Related
 
+- [Python Versions](../concepts/python-versions.md)
 - [Dataclasses](../concepts/dataclasses.md)
-- [Clean Architecture](../patterns/clean-architecture.md)
 - [Error Handling](../patterns/error-handling.md)
+
+## Sources
+
+- https://docs.python.org/3/library/typing.html
+- https://peps.python.org/pep-0695/
+- https://typing-extensions.readthedocs.io/en/latest/
+- https://docs.python.org/3.13/whatsnew/3.13.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts

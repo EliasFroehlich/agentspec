@@ -1,41 +1,43 @@
 # Field Types
 
-> **Purpose**: Type annotations, Optional, Annotated, Field constraints in Pydantic v2
+> **Purpose**: Type annotations, optional fields, Annotated, Field and StringConstraints in Pydantic v2
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
 Pydantic v2 uses Python type annotations to define field types and applies validation
 automatically. The `Field()` function adds metadata, constraints, and descriptions.
 The `Annotated` type allows attaching validators and constraints directly to types,
-making them reusable across models.
+making them reusable across models. String normalization (strip, case) is **not** a `Field()`
+argument: use `StringConstraints` or `ConfigDict(str_strip_whitespace=True)`.
 
 ## The Pattern
 
 ```python
-from typing import Annotated, Literal, Optional
-from pydantic import BaseModel, Field
 from datetime import date
+from typing import Annotated, Literal
 
+from pydantic import BaseModel, Field, StringConstraints
 
-# Reusable annotated types
-NonEmptyStr = Annotated[str, Field(min_length=1, strip_whitespace=True)]
+# Reusable annotated types (StringConstraints exists in 2.10.6, the DBR 17.3 LTS version)
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+UpperCode = Annotated[str, StringConstraints(strip_whitespace=True, to_upper=True, min_length=3, max_length=3)]
 PositiveFloat = Annotated[float, Field(gt=0)]
-CurrencyCode = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
 
 
 class LineItem(BaseModel):
-    description: NonEmptyStr = Field(..., description="Item description")
+    description: NonEmptyStr = Field(description="Item description")   # "  x " -> "x"; "   " fails
     quantity: Annotated[int, Field(ge=1)] = 1
     unit_price: PositiveFloat
-    category: Optional[str] = None
+    currency: UpperCode = "USD"                                          # " brl" -> "BRL"
+    category: str | None = None
 
 
 class ExtractionResult(BaseModel):
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
     source: Literal["invoice", "receipt", "contract"]
-    extracted_date: Optional[date] = None
+    extracted_date: date | None = None
     items: list[LineItem] = Field(default_factory=list)
     tags: set[str] = Field(default_factory=set)
 ```
@@ -45,7 +47,7 @@ class ExtractionResult(BaseModel):
 | Type Annotation | Meaning | Example Value |
 |-----------------|---------|---------------|
 | `str` | Required string | `"hello"` |
-| `Optional[str]` | String or None (must set `= None`) | `None` |
+| `str \| None` | String or None (still required unless `= None`) | `None` |
 | `int` | Required integer | `42` |
 | `float` | Required float (accepts int too) | `3.14` |
 | `bool` | Boolean | `True` |
@@ -54,7 +56,7 @@ class ExtractionResult(BaseModel):
 | `set[str]` | Unique set of strings | `{"a", "b"}` |
 | `Literal["a", "b"]` | Constrained choices | `"a"` |
 | `date` / `datetime` | Date objects | `"2026-01-15"` |
-| `Annotated[str, Field()]` | String with constraints | `"constrained"` |
+| `Annotated[str, StringConstraints(...)]` | Strip / case / length / pattern | `"ABC"` |
 
 ## Field() Constraints
 
@@ -71,24 +73,30 @@ class ExtractionResult(BaseModel):
 | `default` | Any | Default value | `Field(default="USD")` |
 | `default_factory` | Any | Factory for mutable defaults | `Field(default_factory=list)` |
 | `exclude` | Any | Exclude from serialization | `Field(exclude=True)` |
+| `strict` | Any | No coercion for this field | `Field(strict=True)` |
+
+`Field()` has no `strip_whitespace`, `to_lower` or `to_upper`: unknown keywords only raise a
+`PydanticDeprecatedSince20` warning ("extra keyword arguments") and are **silently not applied**.
+In `StringConstraints`, `pattern` is matched after `strip_whitespace` but **before** `to_upper`/
+`to_lower`, so `" brl"` fails `^[A-Z]{3}$` (observed on 2.10.6 and 2.14.1): check length, or the
+case in an `AfterValidator`.
 
 ## Common Mistakes
 
-### Wrong (implicit None default removed in v2)
+### Wrong
 
 ```python
 class Model(BaseModel):
-    # In v2, Optional does NOT auto-set default to None
-    name: Optional[str]  # REQUIRED field that accepts None
+    name: str | None                                         # REQUIRED: v2 adds no implicit None default
+    code: str = Field(min_length=1, strip_whitespace=True)   # warning only, value NOT stripped
 ```
 
-### Correct (explicit default)
+### Correct
 
 ```python
 class Model(BaseModel):
-    name: Optional[str] = None  # Optional with explicit default
-    label: str = "default"      # Has default value
-    value: str                   # Truly required
+    name: str | None = None
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 ```
 
 ## LLM Schema Generation
@@ -97,7 +105,7 @@ class Model(BaseModel):
 import json
 
 class Entity(BaseModel):
-    name: NonEmptyStr = Field(..., description="Entity name")
+    name: NonEmptyStr = Field(description="Entity name")
     entity_type: Literal["person", "org", "location"]
     confidence: Annotated[float, Field(ge=0, le=1, description="Extraction confidence")]
 
@@ -111,3 +119,9 @@ schema = Entity.model_json_schema()
 - [BaseModel](../concepts/base-model.md)
 - [Validators](../concepts/validators.md)
 - [Extraction Schema](../patterns/extraction-schema.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/api/types/
+- https://docs.pydantic.dev/latest/api/fields/
+- https://docs.pydantic.dev/latest/concepts/fields/

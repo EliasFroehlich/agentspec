@@ -1,7 +1,7 @@
 # Feature Engineering
 
-> **Purpose**: Feast feature store patterns -- entity definitions, feature views, materialization, online serving, and point-in-time joins
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Feast feature store patterns -- entity definitions, feature views, on-demand transforms, materialization, online serving, and point-in-time joins (Feast 0.67)
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -16,13 +16,12 @@
 ```python
 """Feast Feature Store: definitions, materialization, and serving."""
 
-from datetime import timedelta, datetime
-from feast import (
-    Entity, FeatureView, FeatureService, Field,
-    FileSource, OnDemandFeatureView, FeatureStore,
-    on_demand_feature_view,
-)
-from feast.types import Float32, Int64, String
+from datetime import datetime, timedelta
+
+import pandas as pd
+from feast import Entity, FeatureService, FeatureStore, FeatureView, Field, FileSource
+from feast.on_demand_feature_view import on_demand_feature_view
+from feast.types import Float32, Float64, Int64, String
 
 # --- 1. Entity Definitions ---
 customer = Entity(
@@ -73,15 +72,16 @@ customer_stats_fv = FeatureView(
     sources=[customer_stats_fv],
     schema=[
         Field(name="is_high_value", dtype=Int64),
-        Field(name="order_frequency_score", dtype=Float32),
+        Field(name="order_frequency_score", dtype=Float64),
     ],
+    mode="pandas",                      # or mode="python" with dict inputs
 )
-def customer_derived_features(inputs):
-    """Compute derived features at request time."""
-    df = inputs["customer_stats"]
-    df["is_high_value"] = (df["lifetime_value"] > 1000).astype(int)
-    df["order_frequency_score"] = df["total_orders"] / (df["days_since_last_order"] + 1)
-    return df
+def customer_derived_features(features_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute derived features at request time from the joined source columns."""
+    out = pd.DataFrame()
+    out["is_high_value"] = (features_df["lifetime_value"] > 1000).astype("int64")
+    out["order_frequency_score"] = features_df["total_orders"] / (features_df["days_since_last_order"] + 1)
+    return out
 
 # --- 5. Feature Service (group features for a model) ---
 fraud_detection_service = FeatureService(
@@ -112,8 +112,6 @@ online_features = store.get_online_features(
 ).to_dict()
 
 # --- 8. Point-in-Time Join (training data) ---
-import pandas as pd
-
 entity_df = pd.DataFrame({
     "customer_id": ["C-12345", "C-67890", "C-11111"],
     "event_timestamp": pd.to_datetime([
@@ -160,8 +158,19 @@ feast feature-views list
 feast entities list
 ```
 
+Feast also has an alpha vector-database integration (Milvus, pgvector, Elasticsearch, Qdrant, SQLite and others) with
+`retrieve_online_documents_v2` for RAG features. On Databricks, use [Feature Engineering in Unity
+Catalog](uc-feature-engineering.md) instead of Feast.
+
 ## See Also
 
 - [Feature Stores Concept](../concepts/feature-stores.md)
 - [Training Data Pipelines](training-data-pipelines.md)
 - [RAG Pipeline Implementation](rag-pipeline-implementation.md)
+
+## Sources
+
+- https://docs.feast.dev/reference/beta-on-demand-feature-view
+- https://docs.feast.dev/getting-started/concepts/point-in-time-joins
+- https://docs.feast.dev/reference/alpha-vector-database
+- https://pypi.org/project/feast/

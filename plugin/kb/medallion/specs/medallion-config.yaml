@@ -1,8 +1,17 @@
-schema_version: "1.0"
+schema_version: "1.1"
 domain: medallion-architecture
 file_type: architecture-config
-last_validated: "2026-02-17"
+last_validated: "2026-10-17"
 source: "Databricks Medallion Architecture, Delta Lake documentation"
+sources:
+  - "https://docs.databricks.com/aws/en/lakehouse/medallion"
+  - "https://docs.databricks.com/aws/en/tables/clustering"
+  - "https://docs.databricks.com/aws/en/optimizations/predictive-optimization"
+  - "https://docs.databricks.com/aws/en/tables/features/column-mapping"
+  - "https://docs.databricks.com/aws/en/tables/features/change-data-feed"
+  - "https://docs.databricks.com/aws/en/ingestion/file-metadata-column"
+  - "https://docs.databricks.com/aws/en/tables/update-schema"
+# Retention values below are example defaults, not platform requirements.
 
 # ── Architecture Configuration ────────────────────────────────
 
@@ -25,8 +34,8 @@ architecture:
       deduplication: true
       retention_days: 365
     - name: gold
-      purpose: "Business aggregations, star schemas, KPIs"
-      write_mode: overwrite
+      purpose: "Dimensional modeling and aggregation per business domain"
+      write_mode: merge            # merge | replace_where | overwrite (plain, schema kept) | materialized_view
       schema_enforcement: true
       merge_schema: false
       deduplication: false
@@ -71,7 +80,7 @@ metadata_columns:
         description: "When the record was ingested"
       - name: "_source_file"
         type: "STRING"
-        description: "Source file path"
+        description: "Source file path from _metadata.file_path (never input_file_name())"
       - name: "_source_system"
         type: "STRING"
         description: "Source system identifier"
@@ -92,7 +101,7 @@ metadata_columns:
         description: "SCD Type 2 valid from"
       - name: "valid_to"
         type: "TIMESTAMP"
-        description: "SCD Type 2 valid to"
+        description: "SCD Type 2 valid to (NULL = current; AUTO CDC uses __START_AT/__END_AT)"
   gold:
     required:
       - name: "_computed_at"
@@ -128,32 +137,39 @@ quality:
 # ── Delta Lake Settings ───────────────────────────────────────
 
 delta:
-  auto_optimize:
-    optimize_write: true
-    auto_compact: true
-  vacuum:
-    retention_hours: 168   # 7 days minimum
-    schedule: "daily"
-  z_order:
-    bronze: []             # no z-order on Bronze
-    silver: ["business_key"]
-    gold: ["common_filter_columns"]
+  layout:
+    strategy: liquid_clustering      # Databricks recommends it for all new tables
+    cluster_by_auto: true            # UC managed tables + predictive optimization (DBR 15.4 LTS+)
+    cluster_by:                      # used when cluster_by_auto is false (external tables)
+      bronze: ["_ingested_at"]
+      silver: ["business_key"]
+      gold: ["common_filter_columns"]
+    partition_by: []                 # only for tables >= 100 TB after measuring
+    z_order: []                      # legacy; predictive optimization never runs ZORDER
+  maintenance:
+    predictive_optimization: true    # runs OPTIMIZE, VACUUM, ANALYZE on UC managed tables
+    manual_schedule_when_external: "daily"
+  retention:
+    deleted_file_retention_duration: "7 days"   # VACUUM window; 7-day floor under predictive optimization
+    log_retention_duration: "30 days"
   change_data_feed:
-    silver: true           # enable CDF on Silver for Gold incremental
+    mode: legacy                     # legacy (delta.enableChangeDataFeed) | automatic (DBR 19+, row tracking)
+    silver: true                     # set at CREATE TABLE time
     gold: false
 
 # ── Schema Evolution ─────────────────────────────────────────
 
 schema_evolution:
   bronze:
-    auto_merge: true
+    auto_merge: true                 # mergeSchema writer option / Auto Loader addNewColumns
     column_mapping: false
   silver:
-    auto_merge: false
+    auto_merge: false                # explicit ALTER TABLE ADD COLUMN, type widening
     column_mapping: true
-    column_mapping_mode: "name"
+    column_mapping_mode: "id"        # "id" for new tables (recommended); "name" for existing tables
     min_reader_version: 2
     min_writer_version: 5
   gold:
     auto_merge: false
-    overwrite_schema: true
+    overwrite_schema: false          # never: replaces schema/partitioning under consumers
+    change_method: ddl               # ALTER TABLE ... ADD COLUMN, then ALTER COLUMN ... SET DEFAULT

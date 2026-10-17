@@ -1,114 +1,122 @@
 # Structured Extraction
 
-> **Purpose**: Extract typed, validated data fields from unstructured documents using LLM prompts and schema enforcement
-> **Confidence**: 0.95
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Extract typed, validated fields from unstructured text and documents with schema-enforced LLM output
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Structured extraction combines precise prompt instructions with schema enforcement to pull specific data fields from documents (invoices, contracts, reports). In 2026, the most reliable approach is native JSON Schema mode (OpenAI), tool-use-as-schema (Anthropic), or the Instructor library (any provider). Combined with Pydantic validation, this achieves over 99% schema adherence in production.
+Structured extraction pairs a precise schema with clear field descriptions and lets the API enforce the shape. Use the
+provider's native structured outputs (Claude `messages.parse`, OpenAI `responses.parse`, Gemini `response_schema`), keep
+Pydantic as the type and for cross-field business checks, and keep "not found" explicit with optional fields. Inside a
+Databricks pipeline, `ai_extract` does the same per row in SQL without managing endpoints.
 
-## The Pattern: Instructor (Recommended for 2026)
+## The Pattern: Claude (native structured outputs)
 
 ```python
-import instructor
-from pydantic import BaseModel, Field
 from typing import Optional
-from openai import OpenAI
 
-# Instructor patches the client for native structured output
-client = instructor.from_openai(OpenAI())
+import anthropic
+from pydantic import BaseModel, Field, model_validator
 
-class Address(BaseModel):
-    street: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    zip_code: Optional[str] = None
+class LineItem(BaseModel):
+    description: str
+    quantity: Optional[float] = None
+    total: Optional[float] = None
 
 class InvoiceData(BaseModel):
-    invoice_number: str = Field(description="Unique invoice identifier")
-    date: str = Field(description="Invoice date in ISO 8601 format")
-    vendor_name: str = Field(description="Name of the vendor/supplier")
-    total_amount: float = Field(description="Total amount without currency symbol")
-    line_items: list[dict] = Field(default_factory=list)
-    vendor_address: Optional[Address] = None
+    invoice_number: str = Field(description="Unique invoice identifier as printed")
+    date: Optional[str] = Field(None, description="Invoice date, ISO 8601 (YYYY-MM-DD)")
+    vendor_name: str = Field(description="Legal name of the vendor")
+    total_amount: float = Field(description="Grand total, number only, no currency symbol")
+    currency: Optional[str] = Field(None, description="ISO 4217 code")
+    line_items: list[LineItem] = Field(default_factory=list)
 
-def extract_invoice(document_text: str) -> InvoiceData:
-    """Extract invoice data with automatic retries and validation."""
-    return client.chat.completions.create(
-        model="gpt-4o",
-        response_model=InvoiceData,  # Instructor handles schema + validation
-        max_retries=2,
-        messages=[{
-            "role": "user",
-            "content": f"Extract invoice data from:\n\n{document_text}"
-        }],
-    )
-# Returns a validated InvoiceData object -- no manual JSON parsing needed
-```
-
-## The Pattern: Anthropic Tool-Use-as-Schema
-
-```python
-import anthropic
+    @model_validator(mode="after")
+    def totals_match(self):
+        items = sum(i.total or 0 for i in self.line_items)
+        if self.line_items and abs(items - self.total_amount) > 0.01 * self.total_amount:
+            raise ValueError("line items do not add up to total_amount")   # business rule, not syntax
+        return self
 
 client = anthropic.Anthropic()
 
-def extract_with_claude(document_text: str) -> dict:
-    """Use Claude's tool_use to enforce output schema."""
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        tools=[{
-            "name": "extract_invoice",
-            "description": "Extract structured invoice data",
-            "input_schema": InvoiceData.model_json_schema(),
-        }],
-        tool_choice={"type": "tool", "name": "extract_invoice"},
-        messages=[{
-            "role": "user",
-            "content": f"Extract invoice data from:\n\n{document_text}"
-        }],
+def extract_invoice(document_text: str) -> InvoiceData:
+    resp = client.messages.parse(
+        model="claude-sonnet-5-5",
+        max_tokens=16000,
+        system="Extract only values that appear in the document. Leave optional fields null when absent.",
+        messages=[{"role": "user", "content": f"<document>\n{document_text}\n</document>"}],
+        output_format=InvoiceData,
     )
-    tool_use = next(b for b in response.content if b.type == "tool_use")
-    return InvoiceData.model_validate(tool_use.input)
+    return resp.parsed_output
+```
+
+## The Pattern: OpenAI and Instructor
+
+```python
+from openai import OpenAI
+
+invoice = OpenAI().responses.parse(
+    model="gpt-6.1-sol",
+    input=[{"role": "user", "content": f"Extract the invoice:\n\n{document_text}"}],
+    text_format=InvoiceData,
+).output_parsed
+
+import instructor   # cross-provider; retries on Pydantic validation errors
+client = instructor.from_provider("anthropic/claude-sonnet-5", mode=instructor.Mode.TOOLS)
+invoice = client.create(max_tokens=4096, response_model=InvoiceData, max_retries=2,
+                        messages=[{"role": "user", "content": document_text}])
+```
+
+## The Pattern: Databricks SQL (`ai_extract`)
+
+```sql
+-- ai_extract v2.1: typed schema, per-row VARIANT result; DBR 15.4 LTS+ (18.2+ recommended)
+SELECT path,
+       r:response:invoice_number:value::STRING AS invoice_number,
+       r:response:total_amount:value::DOUBLE   AS total_amount,
+       r:error_message::STRING                 AS extract_error
+FROM (
+  SELECT path, ai_extract(text,
+    '{"invoice_number": {"type": "string"}, "total_amount": {"type": "number"}}',
+    options => map('version', '2.1')) AS r
+  FROM main.docs.parsed_invoices
+);
 ```
 
 ## Quick Reference
 
-| Method | Provider | Reliability | Notes |
-|--------|----------|-------------|-------|
-| Instructor library | Any | Highest | Pydantic-native, auto-retries, all providers |
-| JSON Schema mode | OpenAI | Highest | `response_format={"type": "json_schema"}` |
-| Tool-use-as-schema | Anthropic | Highest | Force tool call with output schema |
-| JSON mode | OpenAI | High | Valid JSON but no schema enforcement |
-| Prompt-only | Any | Medium | Relies on instruction following |
+| Method | Provider | Notes |
+|--------|----------|-------|
+| `messages.parse(output_format=Model)` | Anthropic | GA; `parsed_output`; check `stop_reason` first |
+| `responses.parse(text_format=Model)` | OpenAI | `output_parsed` |
+| `response_schema=Model` | Gemini | `response.parsed` |
+| Instructor `from_provider` | Many | Library-side retries; check model compatibility for TOOLS mode |
+| `ai_extract` (v2.1) | Databricks | Optional citations and confidence scores; ≤ 256 fields, ≤ 12 nesting levels |
+| Forced tool call | Anthropic | 400 on Opus 5.5 / Sonnet 5.5 / Fable 5.1 — do not use for extraction |
 
 ## Common Mistakes
 
 ### Wrong
+
 ```python
-# Vague prompt, no schema, no validation
+# Vague prompt, no schema, model guesses missing values
 prompt = "Extract data from this invoice and return JSON."
 ```
 
 ### Correct
+
 ```python
-# Instructor: Pydantic model = schema + validation + retries
-result = client.chat.completions.create(
-    model="gpt-4o",
-    response_model=InvoiceData,  # enforces schema, validates, retries
-    max_retries=2,
-    messages=[{"role": "user", "content": f"Extract:\n\n{doc}"}],
-)
+# Schema with descriptions + explicit null policy + API-enforced output + business-rule validation
+invoice = extract_invoice(document_text)
 ```
 
 ## Extraction Pipeline
 
 ```text
-Document --> Instructor/Tool-Use --> LLM --> Pydantic Validated Object
-                                                   |
-                                              On Error --> Auto-retry with error context
+Document ──► (PDF? → native document input or ai_parse_document) ──► structured-output call
+         ──► Pydantic business validation ──► OK → store │ fail → re-ask with the validation error, or flag for review
 ```
 
 ## Related
@@ -116,3 +124,10 @@ Document --> Instructor/Tool-Use --> LLM --> Pydantic Validated Object
 - [Output Formatting](../concepts/output-formatting.md)
 - [Document Extraction Pattern](../patterns/document-extraction.md)
 - [Multi-Pass Extraction](../patterns/multi-pass-extraction.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.openai.com/docs/guides/structured-outputs
+- https://python.useinstructor.com/integrations/anthropic/
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_extract

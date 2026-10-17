@@ -1,119 +1,99 @@
 # Python Clean Code Quick Reference
 
-> Fast lookup tables. For code examples, see linked files.
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Fast lookup tables; code examples live in the linked files
+> **Confidence**: 0.95
+> **MCP Validated**: 2026-10-17
 
-## Dataclass Options (3.10+)
+## Versions (2026-10-17)
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `slots=True` | `False` | Generate `__slots__`, faster attribute access, less memory |
-| `frozen=True` | `False` | Immutable instances, hashable |
-| `kw_only=True` | `False` | All fields require keyword arguments |
-| `match_args=True` | `True` | Enable structural pattern matching |
-| `order=True` | `False` | Generate comparison methods |
-| `eq=True` | `True` | Generate `__eq__` and `__ne__` |
+| Version | Status | Note |
+|---------|--------|------|
+| 3.10 | EOL 2026-10-01 | upgrade |
+| 3.12 | security fixes until 2028-10 | Databricks Runtime 17.3 LTS = 3.12.3 |
+| 3.14 | bugfix | free-threaded build supported |
+| 3.15 | bugfix, released 2026-10-09 | latest |
 
-## Type Hint Patterns (3.11-3.14)
+## Type Hint Patterns
 
 | Pattern | Syntax | Version |
 |---------|--------|---------|
-| Union (modern) | `int \| str` | 3.10+ |
-| Optional (modern) | `str \| None` | 3.10+ |
+| Union / optional | `int \| str`, `str \| None` | 3.10+ |
 | Self return | `-> Self` | 3.11+ |
-| TypeVar (modern) | `def fn[T](x: T) -> T:` | 3.12+ |
-| Type alias (modern) | `type Vector = list[float]` | 3.12+ |
-| TypedDict | `class Config(TypedDict):` | 3.8+ |
-| Literal | `Literal["read", "write"]` | 3.8+ |
-| TypeIs (narrow) | `def is_str(v: object) -> TypeIs[str]:` | 3.13+ |
-| TypeForm | `def check(t: TypeForm) -> bool:` | 3.13+ |
-| TypeVar defaults | `class C[T = int]:` | 3.13+ |
-| Deferred annotations | Annotations evaluated lazily (PEP 649) | 3.14+ |
+| Generic function / class | `def fn[T](x: T) -> T`, `class Box[T]:` | 3.12+ |
+| Type alias | `type Vector = list[float]` | 3.12+ |
+| TypeIs (narrow both branches) | `def is_str(v: int \| str) -> TypeIs[str]` | 3.13+ (typing_extensions 4.10+) |
+| Read-only TypedDict key | `ReadOnly[str]` | 3.13+ (typing_extensions 4.9+) |
+| Deprecation marker | `@warnings.deprecated("...")` | 3.13+ (typing_extensions) |
+| Deferred annotations | forward refs without quotes | 3.14+ |
+| TypeForm | `def cast[T](tp: TypeForm[T], v: object) -> T` | 3.15+ (typing_extensions 4.13+) |
 
-## Generator vs List Comprehension
+## New Syntax by Version (not available on 3.12)
 
-| Use Case | Choose | Why |
-|----------|--------|-----|
-| Need all items in memory | List comprehension `[x for x in items]` | Random access |
-| Large/infinite dataset | Generator expression `(x for x in items)` | Lazy evaluation |
-| Transform + filter pipeline | Generator chaining | Memory efficient |
-| Need to iterate once | Generator | Lower memory |
-| Need `len()` or indexing | List | Generators have no length |
+| Feature | Version | Example |
+|---------|---------|---------|
+| Template strings | 3.14 | `t"WHERE id = {id}"` -> `Template` |
+| Unparenthesized except | 3.14 | `except TimeoutError, OSError:` (no `as`) |
+| Lazy imports | 3.15 | `lazy import json` (module level only) |
+| frozendict | 3.15 | `frozendict(a=1)` |
 
-## Context Manager Patterns
+## Dataclass Options
 
-| Pattern | Use Case | Module |
-|---------|----------|--------|
-| `with open(f) as fh:` | File I/O | builtin |
-| `@contextmanager` | Simple resource management | `contextlib` |
-| `class + __enter__/__exit__` | Complex state machines | builtin |
-| `suppress(ExceptionType)` | Ignore specific exceptions | `contextlib` |
-| `ExitStack()` | Dynamic number of resources | `contextlib` |
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `slots=True` | `False` | `__slots__`, no instance `__dict__` |
+| `frozen=True` | `False` | Immutable; hashable with `eq=True` |
+| `kw_only=True` | `False` | Keyword-only constructor |
+| `order=True` | `False` | Comparison methods |
 
-## Python 3.13-3.14 New Features
-
-| Feature | Version | Description |
-|---------|---------|-------------|
-| Free-threading (no-GIL) | 3.13 exp, 3.14 supported | True multi-core parallelism with `python3.14t` build |
-| JIT compiler | 3.13 exp, 3.14 exp | Copy-and-patch JIT for performance gains |
-| Template strings (t-strings) | 3.14+ | `t"Hello {name}"` returns `Template` object for custom processing |
-| Deferred annotations (PEP 649) | 3.14+ | Annotations evaluated lazily, reduces import-time overhead |
-| `TypeIs` (PEP 742) | 3.13+ | Narrow types in both if/else branches (replaces TypeGuard) |
-| `TypeForm` (PEP 747) | 3.13+ | Annotate type forms passed as values |
-| Improved REPL | 3.13+ | Multi-line editing, color output, better history |
-| `annotationlib` module | 3.14+ | Programmatic access to deferred annotations |
-
-## uv Package Manager
+## uv / ruff Commands
 
 | Command | Purpose |
 |---------|---------|
-| `uv init myproject` | Create new project with `pyproject.toml` |
-| `uv add requests` | Add dependency |
-| `uv add pytest --dev` | Add dev dependency |
-| `uv sync` | Install/sync all dependencies |
-| `uv lock` | Create/update lockfile |
-| `uv run pytest` | Run command in project environment |
-| `uv python install 3.14` | Install Python version |
-| `uv python pin 3.13` | Pin project Python version |
-| `uv tool install ruff` | Install CLI tool globally |
-| `uv run script.py` | Run standalone script with inline deps |
+| `uv init --package app --python 3.12` | New src-layout project pinned to 3.12 |
+| `uv add pkg` / `uv add --group test pytest` | Runtime / dependency-group (PEP 735) dependency |
+| `uv lock` / `uv sync --locked` | Resolve / install exactly the lockfile (CI) |
+| `uv run pytest` / `uvx ty check` | Run in project venv / run a tool ad hoc |
+| `uv python pin 3.12` | Write `.python-version` |
+| `ruff check --select UP,F401 --fix .` | Auto-modernize to `target-version` and drop unused imports |
+| `ruff format .` | Format (Black-compatible) |
 
 ## Decision Matrix
 
 | Use Case | Choose |
 |----------|--------|
-| Plain data container | `@dataclass(slots=True)` |
-| Immutable config | `@dataclass(frozen=True, slots=True)` |
-| Data with validation | Pydantic BaseModel |
-| Data container + attrs features | `attrs` with `@define` |
-| Return type is self | `-> Self` (3.11+) |
-| Parse large file line by line | Generator with `yield` |
-| Manage resource lifecycle | Context manager |
-| Chain transformations | Generator pipeline |
-| Catch specific errors only | `except SpecificError` |
-| Narrow types in conditionals | `TypeIs` (3.13+, prefer over TypeGuard) |
-| Package management | `uv` (replaces pip, poetry, pyenv) |
-| True multi-threading | Free-threaded build `python3.14t` |
+| Plain / immutable container | `@dataclass(slots=True)` / `@dataclass(frozen=True, slots=True)` |
+| Validation at a boundary | Pydantic `BaseModel` |
+| High-volume JSON/MessagePack decoding | `msgspec.Struct` |
+| Large file, line by line | Generator with `yield` |
+| Several failures to report together | `ExceptionGroup` + `except*` (3.11+) |
+| Type checker | mypy 2.x or pyright; ty only experimentally (beta) |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| `except Exception:` (bare) | `except (ValueError, TypeError) as e:` |
+| `except:` / deep `except Exception:` | `except (ValueError, TypeError) as e:`; broad catch only at the boundary |
 | Mutable default `field=[]` | `field(default_factory=list)` |
-| `type(x) == str` | `isinstance(x, str)` |
-| `from typing import Optional` | `str \| None` (3.10+) |
-| Return `None` implicitly | Use explicit return type `-> None` |
-| Nested list comprehensions (3+) | Extract to named generator function |
-| `pip install` + `venv` manually | `uv add` + `uv sync` (faster, unified) |
-| `TypeGuard` for narrowing | `TypeIs` (3.13+, narrows both branches) |
-| `threading` for CPU-bound work | Free-threaded build or `multiprocessing` |
+| `datetime.utcnow()` | `datetime.now(UTC)` (utcnow deprecated in 3.12, naive) |
+| `tempfile.mktemp()` | `tempfile.mkstemp()` / `NamedTemporaryFile` / pytest `tmp_path` |
+| `from typing import TypeIs` on a 3.12 cluster | `from typing_extensions import TypeIs` |
+| `ignore = ["ANN101", "ANN102"]` in ruff | Delete (rules removed in ruff 0.8.0) |
+| uv without a pin | `--python 3.12` / `.python-version` matching the runtime |
 
 ## Related Documentation
 
 | Topic | Path |
 |-------|------|
-| Dataclasses deep dive | `concepts/dataclasses.md` |
+| Versions and backports | `concepts/python-versions.md` |
 | Type hints guide | `concepts/type-hints.md` |
-| Error handling patterns | `patterns/error-handling.md` |
+| Tooling | `patterns/project-tooling.md` |
 | Full Index | `index.md` |
+
+## Sources
+
+- https://devguide.python.org/versions/
+- https://docs.python.org/3/library/typing.html
+- https://docs.python.org/3/library/datetime.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
+- https://docs.astral.sh/uv/
+- https://docs.astral.sh/ruff/rules/missing-type-self/

@@ -2,11 +2,11 @@
 
 > **Purpose**: Kimball methodology — facts, dimensions, conformed dims, bus matrix, grain definition
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Dimensional modeling (Kimball) organizes data into fact tables (measures/events) and dimension tables (context/attributes). The grain — what one row represents — is the single most important decision. Facts are numeric and additive; dimensions are descriptive and filterable.
+Dimensional modeling (Kimball) organizes data into fact tables (measures/events) and dimension tables (context/attributes). The grain — what one row represents — is the single most important decision. Facts are numeric and additive; dimensions are descriptive and filterable. The DDL below is ANSI-style; on Databricks/Delta, `PRIMARY KEY`/`REFERENCES` are **informational** (not enforced) and identity columns disable concurrent writes — see the table at the end.
 
 ## The Concept
 
@@ -91,12 +91,18 @@ Kimball dimensional modeling remains the dominant approach for analytics, but th
 
 | Evolution | Impact |
 |----------|--------|
-| **Semantic layers** (dbt Metrics, Cube) | Abstract joins; analysts query metrics, not raw star schemas |
+| **Semantic layers** (Unity Catalog metric views, dbt Semantic Layer, Cube) | Define measures once over the star schema; see [metric views](../../metric-views/index.md) |
 | **OBT as a mart** | Build denormalized tables from star schema for specific dashboards |
 | **Data Vault + Dim marts** | Data Vault for raw integration, dimensional marts for consumption |
-| **Liquid clustering** (Delta 4.x) | Replaces manual partitioning and Z-ORDER on fact tables |
-| **Identity columns** (Delta 4.0+) | Native auto-increment surrogate keys, replacing sequence-based approaches |
+| **Liquid clustering** (Delta OSS 3.1+, Databricks GA DBR 15.4 LTS; `CLUSTER BY AUTO` on UC managed) | Replaces manual partitioning and Z-ORDER on fact tables |
+| **Identity columns** (Delta OSS 3.3+ API, SQL DDL 4.4+; Databricks SQL DBR 10.4 LTS+) | Auto-increment surrogate keys — but they **disable concurrent transactions** on the table |
 | **Data contracts** | Enforce grain, types, and constraints at write time |
+
+| Constraint on Databricks/Delta | Behavior |
+|---|---|
+| `NOT NULL`, `CHECK` | Enforced: violating writes fail |
+| `PRIMARY KEY`, `FOREIGN KEY` | Informational (GA DBR 15.2+); `RELY` lets the optimizer use them (Photon) — you must keep them true |
+| `UNIQUE` | Informational, Public Preview (DBR 18.2+) |
 
 The Kimball bus matrix remains essential for planning which conformed dimensions are shared across facts. Data Mesh teams can own their domain's star schemas while sharing conformed dimensions via a "shared" or "master" domain.
 
@@ -105,3 +111,12 @@ The Kimball bus matrix remains essential for planning which conformed dimensions
 - [scd-types](scd-types.md)
 - [star-schema pattern](../patterns/star-schema.md)
 - [one-big-table pattern](../patterns/one-big-table.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-constraint
+- https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/tables/clustering
+- https://docs.databricks.com/aws/en/uc-semantics/metric-views
+- https://github.com/delta-io/delta/releases

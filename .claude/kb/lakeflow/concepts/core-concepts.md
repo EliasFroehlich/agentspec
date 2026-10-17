@@ -1,85 +1,129 @@
-# Lakeflow Declarative Pipelines - Core Concepts
+# Lakeflow Pipelines - Core Concepts
 
-> Source: https://docs.databricks.com/aws/en/dlt/concepts
-> Status: Generally Available (July 2025), open-sourced as Spark Declarative Pipelines
+> **Purpose**: Datasets, flows, sinks, and pipelines in Lakeflow Spark Declarative Pipelines (formerly Delta Live Tables)
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Lakeflow Declarative Pipelines is a declarative framework for developing batch and streaming data pipelines in SQL and Python.
+Lakeflow Spark Declarative Pipelines (SDP), called "Lakeflow pipelines" in the Databricks docs, is a
+declarative framework for batch and streaming pipelines in SQL and Python. The product formerly known
+as Delta Live Tables (DLT) was renamed with no migration required; old code still runs. Lakeflow
+pipelines extend Apache Spark Declarative Pipelines, which ships with Apache Spark 4.1+.
 
-## Key Concepts
+## The Concept
 
-### 1. Flows
-- Foundational data processing concept
-- Supports streaming and batch semantics
-- Reads data from sources, applies processing logic, writes results
-- **Flow types include:**
-  - Append
-  - Update
-  - Complete
-  - AUTO CDC
-  - Materialized View
+```python
+from pyspark import pipelines as dp   # Python module (formerly the `dlt` module)
 
-### 2. Streaming Tables
-- Unity Catalog managed tables
-- Can have multiple streaming flows
-- Supports AUTO CDC flow type
+@dp.table                              # streaming table: streaming read
+def orders_raw():
+    return spark.readStream.table("main.sales.orders_landing")
 
-### 3. Materialized Views
-- Batch-oriented Unity Catalog managed tables
-- Flows always defined implicitly within view definition
+@dp.materialized_view                  # materialized view: batch read
+def orders_by_day():
+    return spark.read.table("orders_raw").groupBy("order_date").count()
 
-### 4. Sinks
-- Streaming targets
-- Currently supports:
-  - Delta tables
-  - Apache Kafka
-  - Azure EventHubs
+@dp.temporary_view                     # view: not persisted, pipeline-scoped
+def open_orders():
+    return spark.read.table("orders_raw").where("status = 'OPEN'")
+```
 
-### 5. Pipelines
-- Unit of development and execution
-- Can contain flows, streaming tables, materialized views, sinks
-- Automatically orchestrates execution and parallelization
+### Datasets
 
-## Key Benefits
+| Dataset | Processing semantics | Use for |
+|---------|----------------------|---------|
+| Streaming table | Each record processed once (append-only source) | Ingestion, incremental transforms |
+| Materialized view | Recomputed as needed, incrementally when possible | Joins, aggregations, sources with updates/deletes |
+| View (temporary) | Evaluated on demand, not published | Intermediate steps, checks |
 
-- **Automatic orchestration** - No manual task coordination needed
-- **Declarative processing** - Focus on "what" not "how"
-- **Incremental processing** - Only processes new/changed data
-- **Simplified CDC event handling** - Built-in change data capture
-- **Reduced manual coding** - Framework handles complexity
+### Flows
 
-## Technical Foundation
+| Flow type | Notes |
+|-----------|-------|
+| Append (default) | Any number of append flows can write to one target; `ONCE` = one-time backfill |
+| Auto CDC (previously apply changes) | Targets streaming tables only; multiple Auto CDC flows per target |
+| Update (Public Preview) | Python only; global non-watermarked aggregates to a sink |
 
-- Runs on Databricks Runtime (16.4+ / 17.3 preview)
-- Uses the same DataFrame API as Apache Spark and Structured Streaming
-- Integrates with Unity Catalog for governance
-- Open-sourced as **Spark Declarative Pipelines** (contributed to Apache Spark at DAIS 2025)
+The docs state that only Append and Update streaming output modes are exposed (Complete is not).
 
-## Recent Enhancements (2025-2026)
+### Sinks
 
-### Move Tables Between Pipelines (GA, 2025.29)
+Streaming targets outside the pipeline: Delta tables (UC managed or external), Apache Kafka, Azure
+Event Hubs (Kafka interface), custom Python data sources, and the ForEachBatch sink. Python only.
 
-Move Materialized Views and Streaming Tables from one pipeline to another using a SQL command plus a minor code adjustment. Enables pipeline refactoring without data loss.
+### Pipeline
 
-### AUTO CDC Enhancements (2025.30)
+The unit of development and execution. It analyzes dependencies between datasets and runs flows in
+order with maximum parallelism. Mode: triggered (default) or continuous.
 
-- **Multiple flows per target**: `create_auto_cdc_flow` now supports a `name` parameter, allowing multiple independent CDC flows writing to the same destination table
-- **One-time backfills**: `once=True` parameter for initial hydration snapshots
-- **SQL support**: New `CREATE AUTO CDC FLOW` SQL syntax alongside Python API
+## Runtime: channel, not cluster version
 
-### Type Widening (Feb 2026)
+Pipelines are versionless; the `channel` setting picks the runtime. As of 2026-10-17:
+`CURRENT` (default) = Databricks Runtime 18, `PREVIEW` = Databricks Runtime 19. This is independent of
+the DBR version your Lakeflow Jobs clusters use (for example DBR 17.3 LTS).
 
-Pipelines support safe column type broadening (e.g., `INT` to `LONG`, `FLOAT` to `DOUBLE`) without requiring a full pipeline reset. Enables schema evolution workflows that previously required manual intervention.
+## Quick Reference
 
-### SCD Type 1 with AUTO CDC (Feb 2026)
+| Need | Use |
+|------|-----|
+| Ingest files incrementally | Streaming table + Auto Loader |
+| Aggregate or join | Materialized view |
+| Reusable intermediate logic | Temporary view |
+| SCD Type 1/2 from a change feed | `AUTO CDC` flow |
+| Write to Kafka or an external table | Sink + append flow |
+| Develop and debug | Lakeflow Pipelines Editor (files in `transformations/`) |
 
-SCD Type 1 materialization with AUTO CDC provides a simpler CDC pattern that upserts the latest value without maintaining full change history.
+## Common Mistakes
 
-### Multi-Catalog/Schema (2025.04)
+### Wrong
 
-New pipelines support creating and updating materialized views and streaming tables in multiple catalogs and schemas. The `LIVE` virtual schema and associated syntax is no longer required.
+```python
+import dlt  # legacy module name; still works, not recommended
 
-### Serverless TCO Reduction
+@dlt.table  # legacy: one decorator for both STs and MVs
+def daily_totals():
+    return spark.read.table("orders").groupBy("order_date").count()
+```
 
-Recent optimizations cut total cost of ownership (TCO) by up to 70% for serverless pipelines, making serverless the clear default for new pipelines.
+### Correct
+
+```python
+from pyspark import pipelines as dp
+
+@dp.materialized_view  # batch query -> materialized view
+def daily_totals():
+    return spark.read.table("orders").groupBy("order_date").count()
+```
+
+## Recent Platform Changes
+
+| When | Change |
+|------|--------|
+| 2025.04 | Default publishing mode: multi-catalog/schema, `LIVE` schema no longer required |
+| 2025.29 | Move tables between pipelines GA |
+| 2025.30 | Auto CDC: `name` (multiple flows per target), `once`, `CREATE FLOW` in SQL |
+| Feb 2026 | Type widening; SCD Type 1 materialization with AUTO CDC |
+| May 2026 | Bitemporal AUTO CDC (Beta) |
+| Jun 2026 | Liquid clustering on AUTO CDC targets |
+| Aug 2026 | `CREATE TABLE ... FLOW` / `dp.create_table()` (Beta); event log system table (Beta) |
+| Sep 2026 | Run-as account group; Rewind (Beta); Python unit testing (Beta) |
+
+## Related
+
+- [Python module migration](python-module-migration.md)
+- [Getting started](getting-started.md)
+- [Flows and sinks](../patterns/flows-and-sinks.md)
+- [Limitations](../reference/limitations.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/concepts
+- https://docs.databricks.com/aws/en/ldp/concepts/where-is-dlt
+- https://docs.databricks.com/aws/en/ldp/concepts/flows
+- https://docs.databricks.com/aws/en/ldp/ldp-sinks
+- https://docs.databricks.com/aws/en/ldp/developer/python-ref
+- https://docs.databricks.com/aws/en/release-notes/dlt/
+- https://docs.databricks.com/aws/en/release-notes/dlt/2026
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/04/
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/30/

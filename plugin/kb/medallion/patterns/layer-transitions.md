@@ -1,7 +1,8 @@
 # Layer Transitions
 
 > **Purpose**: End-to-end Bronze to Silver to Gold transformation flow with orchestration
-> **MCP Validated**: 2026-03-26
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -14,7 +15,7 @@
 ```python
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, current_timestamp, input_file_name, lit,
+    col, current_timestamp, lit,
     row_number, trim, upper, to_timestamp, sum as _sum, count, avg
 )
 from pyspark.sql.window import Window
@@ -25,16 +26,17 @@ spark = SparkSession.builder.getOrCreate()
 
 # ── BRONZE: Raw Ingestion ─────────────────────────────────────
 def ingest_bronze(source_path: str, bronze_table: str, source: str):
-    """Append raw data to Bronze with ingestion metadata."""
+    """Append raw data to Bronze with ingestion metadata (batch variant; for recurring
+    file drops prefer Auto Loader, see incremental-loading.md). input_file_name() is not
+    available on Unity Catalog and not supported on DBR 17.3 LTS+: use _metadata."""
     raw_df = (
-        spark.read
-        .option("mergeSchema", "true")
-        .json(source_path)
+        spark.read.format("json")
+        .load(source_path)
+        .select("*", col("_metadata.file_path").alias("_source_file"))
         .withColumn("_ingested_at", current_timestamp())
-        .withColumn("_source_file", input_file_name())
         .withColumn("_source_system", lit(source))
     )
-    raw_df.write.format("delta").mode("append").saveAsTable(bronze_table)
+    raw_df.write.mode("append").option("mergeSchema", "true").saveAsTable(bronze_table)
     return raw_df.count()
 
 
@@ -62,7 +64,7 @@ def process_silver(bronze_table: str, silver_table: str, keys: list):
         .drop("_rn")
     )
 
-    # Merge into Silver
+    # Merge into Silver (create the table with DDL beforehand in production)
     if spark.catalog.tableExists(silver_table):
         silver_delta = DeltaTable.forName(spark, silver_table)
         merge_condition = " AND ".join([f"t.{k} = s.{k}" for k in keys])
@@ -91,7 +93,9 @@ def build_gold(silver_table: str, gold_table: str):
         .withColumn("_computed_at", current_timestamp())
     )
 
-    gold_df.write.format("delta").mode("overwrite").saveAsTable(gold_table)
+    # Plain overwrite: keeps the DDL-defined schema; a mismatching DataFrame fails.
+    # Never add overwriteSchema here (see gold-layer.md).
+    gold_df.write.mode("overwrite").saveAsTable(gold_table)
     return gold_df.count()
 ```
 
@@ -102,9 +106,9 @@ def build_gold(silver_table: str, gold_table: str):
 | `bronze.write_mode` | `append` | Always append in Bronze |
 | `silver.merge_keys` | `[]` | Business keys for deduplication |
 | `silver.scd_type` | `1` | SCD Type 1 (overwrite) or 2 (history) |
-| `gold.write_mode` | `overwrite` | Full refresh or incremental merge |
-| `gold.partition_by` | `[]` | Partition columns for Gold tables |
-| `checkpoint_path` | `/checkpoints/{table}` | Streaming checkpoint location |
+| `gold.write_mode` | `overwrite` | Full refresh (plain overwrite), `MERGE`, `INSERT ... REPLACE WHERE`, or a materialized view |
+| `gold.cluster_by` | `AUTO` | `CLUSTER BY AUTO` on UC managed tables; explicit keys otherwise |
+| `checkpoint_path` | `/Volumes/<catalog>/<schema>/<volume>/checkpoints/{table}` | Streaming checkpoint location (no `/mnt`) |
 
 ## Orchestration Pattern
 
@@ -133,21 +137,22 @@ def run_medallion_pipeline(config: dict):
         gold_table=config["gold_table"],
     )
 
-    # Post-processing
-    # Delta 4.x: liquid clustering (no ZORDER needed if CLUSTER BY is set)
-    spark.sql(f"OPTIMIZE {config['silver_table']}")
-    spark.sql(f"OPTIMIZE {config['gold_table']}")
+    # Post-processing: none on UC managed tables with predictive optimization (it runs
+    # OPTIMIZE/VACUUM/ANALYZE). External tables: schedule OPTIMIZE (liquid clustering, Delta 3.1+).
+    if config.get("manual_optimize"):
+        for t in (config["silver_table"], config["gold_table"]):
+            spark.sql(f"OPTIMIZE {t}")
 
     return results
 
 
 # Usage
 pipeline_config = {
-    "source_path": "/mnt/landing/orders/2026-02-17/",
+    "source_path": "/Volumes/main/landing/raw/orders/2026-10-17/",
     "source_system": "ecommerce_api",
-    "bronze_table": "bronze_sales.raw_orders",
-    "silver_table": "silver_sales.cleansed_orders",
-    "gold_table": "gold_sales.agg_customer_revenue",
+    "bronze_table": "main.bronze_sales.raw_orders",
+    "silver_table": "main.silver_sales.cleansed_orders",
+    "gold_table": "main.gold_sales.agg_customer_revenue",
     "business_keys": ["order_id"],
 }
 
@@ -158,9 +163,9 @@ results = run_medallion_pipeline(pipeline_config)
 
 ```python
 # Individual layer execution (for testing or partial runs)
-ingest_bronze("/mnt/landing/orders/", "bronze_sales.raw_orders", "api")
-process_silver("bronze_sales.raw_orders", "silver_sales.cleansed_orders", ["order_id"])
-build_gold("silver_sales.cleansed_orders", "gold_sales.agg_revenue")
+ingest_bronze("/Volumes/main/landing/raw/orders/", "main.bronze_sales.raw_orders", "api")
+process_silver("main.bronze_sales.raw_orders", "main.silver_sales.cleansed_orders", ["order_id"])
+build_gold("main.silver_sales.cleansed_orders", "main.gold_sales.agg_revenue")
 ```
 
 ## See Also
@@ -169,3 +174,12 @@ build_gold("silver_sales.cleansed_orders", "gold_sales.agg_revenue")
 - [Silver Layer](../concepts/silver-layer.md)
 - [Gold Layer](../concepts/gold-layer.md)
 - [Incremental Loading](../patterns/incremental-loading.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/lakehouse/medallion
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/input_file_name
+- https://docs.databricks.com/aws/en/ingestion/file-metadata-column
+- https://docs.databricks.com/aws/en/optimizations/predictive-optimization
+- https://docs.databricks.com/aws/en/dbfs/mounts
+- https://spark.apache.org/docs/latest/sql-data-sources-json.html

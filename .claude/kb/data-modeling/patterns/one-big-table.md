@@ -2,7 +2,7 @@
 
 > **Purpose**: Denormalized analytics table — when to use, the 2025+ debate, materialization strategy, trade-offs
 > **Confidence**: 0.92
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -62,12 +62,14 @@ JOIN dim_date d ON f.date_sk = d.date_sk
 JOIN current_customers c ON f.customer_sk = c.customer_sk
 JOIN dim_product p ON f.product_sk = p.product_sk;
 
--- Incremental refresh strategy (for large tables)
--- Use MERGE or DELETE+INSERT for the changed date partition
-DELETE FROM obt_order_analytics WHERE order_date >= CURRENT_DATE - INTERVAL '3 days';
+-- Incremental refresh (large tables): replace the recent slice atomically.
+-- DELETE + INSERT is two commits: readers can see the gap and a failure leaves it empty.
+-- Databricks (DBR 12.2 LTS+, Delta): one commit
 INSERT INTO obt_order_analytics
-SELECT /* same query as above */
-WHERE d.full_date >= CURRENT_DATE - INTERVAL '3 days';
+REPLACE WHERE order_date >= current_date() - INTERVAL 3 DAYS
+SELECT /* same query as above */ ...
+WHERE d.full_date >= current_date() - INTERVAL 3 DAYS;
+-- Other engines: MERGE on the grain key, or INSERT OVERWRITE of the affected partitions.
 ```
 
 ## Quick Reference
@@ -116,7 +118,7 @@ The data community debated OBT vs Star Schema extensively in 2025. Key takeaways
 | Storage | Higher (repeated attributes) | Lower (normalized dims) |
 | Cloud DWH cost | Storage cheap, compute saved | Storage efficient, more compute on joins |
 
-**Best practice (2025+):** Use star schema as the foundation (Silver/Gold layer). Build purpose-specific OBTs as materialized marts for dashboards. Use a semantic layer (dbt Metrics, Cube, AtScale) to abstract join complexity for analysts. This gives the best of both worlds: consistency from star schema, performance from OBT where needed.
+**Best practice:** Use star schema as the foundation (Silver/Gold layer). Build purpose-specific OBTs as materialized marts for dashboards — on Databricks a materialized view, which refreshes incrementally when possible. Use a semantic layer (Unity Catalog metric views, dbt Semantic Layer, Cube, AtScale) to abstract join complexity for analysts. This gives consistency from the star schema and performance from the OBT where needed.
 
 ```sql
 -- Pattern: Star schema foundation + OBT mart
@@ -125,11 +127,15 @@ CREATE TABLE gold.fact_orders (...);
 CREATE TABLE gold.dim_customer (...);
 CREATE TABLE gold.dim_product (...);
 
--- Mart layer: OBT for specific dashboard (disposable, rebuildable)
-CREATE OR REPLACE TABLE mart.obt_executive_dashboard AS
-SELECT ... FROM gold.fact_orders
-JOIN gold.dim_customer USING (customer_sk)
-JOIN gold.dim_product USING (product_sk);
+-- Mart layer: OBT for a specific dashboard (disposable, rebuildable)
+-- Databricks: materialized view (Pro/serverless SQL warehouse or a pipeline)
+CREATE OR REPLACE MATERIALIZED VIEW main.mart.obt_executive_dashboard
+CLUSTER BY AUTO
+AS SELECT ... FROM main.gold.fact_orders
+JOIN main.gold.dim_customer USING (customer_sk)
+JOIN main.gold.dim_product USING (product_sk);
+-- Plain table alternative: CREATE OR REPLACE TABLE ... AS SELECT (keeps history and grants;
+-- restate CLUSTER BY AUTO in every replace).
 ```
 
 ## Related
@@ -137,3 +143,11 @@ JOIN gold.dim_product USING (product_sk);
 - [star-schema](star-schema.md)
 - [dimensional-modeling](../concepts/dimensional-modeling.md)
 - [normalization](../concepts/normalization.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-dml-insert-into
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-materialized-view
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+- https://docs.databricks.com/aws/en/tables/clustering
+- https://docs.databricks.com/aws/en/lakehouse/medallion

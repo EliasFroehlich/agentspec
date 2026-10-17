@@ -87,7 +87,7 @@ Every agent declares a tier in frontmatter (`tier: T1|T2|T3`). The tier governs 
 ### Current Distribution
 
 - **T1 (10 agents):** genai-architect, medallion-architect, aws-data-architect, gcp-data-architect, ai-prompt-specialist, python-developer, lakeflow-specialist, spark-performance-analyzer, spark-troubleshooter, prompt-crafter
-- **T2 (28 agents):** data-platform-engineer, kb-architect, lakehouse-architect, pipeline-architect, schema-designer, the-planner, ai-data-engineer-gcp, code-cleaner, code-documenter, code-reviewer, data-contracts-engineer, data-quality-analyst, test-generator, ai-data-engineer, dbt-specialist, spark-engineer, spark-specialist, sql-optimizer, streaming-engineer, codebase-explorer, meeting-analyst, shell-script-specialist, brainstorm-agent, build-agent, define-agent, design-agent, iterate-agent, ship-agent
+- **T2 (28 agents + agent-architect, repo-local):** data-platform-engineer, kb-architect, lakehouse-architect, pipeline-architect, schema-designer, the-planner, ai-data-engineer-gcp, code-cleaner, code-documenter, code-reviewer, data-contracts-engineer, data-quality-analyst, test-generator, ai-data-engineer, dbt-specialist, spark-engineer, spark-specialist, sql-optimizer, streaming-engineer, codebase-explorer, meeting-analyst, shell-script-specialist, brainstorm-agent, build-agent, define-agent, design-agent, iterate-agent, ship-agent
 - **T3 (20 agents):** ai-data-engineer-cloud, ai-prompt-specialist-gcp, aws-deployer, aws-lambda-architect, ci-cd-specialist, lambda-builder, supabase-specialist, fabric-ai-specialist, fabric-architect, fabric-cicd-specialist, fabric-logging-specialist, fabric-pipeline-developer, fabric-security-specialist, llm-specialist, airflow-specialist, lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, qdrant-specialist, spark-streaming-architect
 
 ---
@@ -130,7 +130,7 @@ KB SILENT        | MCP-ONLY(0.85) | N/A            | LOW (0.50)     |
 
 ## Agent Categories
 
-### 1. Architect (8 agents)
+### 1. Architect (8 agents + 1 repo-local)
 
 System-level design and architecture decisions.
 
@@ -144,6 +144,7 @@ System-level design and architecture decisions.
 | `pipeline-architect` | T2 | sonnet | Airflow, Dagster, DAG design patterns |
 | `schema-designer` | T2 | sonnet | Dimensional modeling, SCD, Data Vault |
 | `data-platform-engineer` | T2 | sonnet | Snowflake, Databricks, BigQuery, cost optimization |
+| `agent-architect` | T2 | sonnet | (repo-local, not in the plugin) Generates an agent.md from a filled agent.schema.md spec (generation only) |
 
 ### 2. Cloud (10 agents)
 
@@ -159,7 +160,7 @@ Cloud provider services, deployment, and CI/CD.
 | `ai-data-engineer-gcp` | T2 | sonnet | GCP serverless architectures, Cloud Functions, BigQuery pipelines |
 | `ai-data-engineer-cloud` | T3 | sonnet | Cloud architecture optimization, AI/ML pipelines |
 | `ai-prompt-specialist-gcp` | T3 | sonnet | Google Gemini, Vertex AI, multi-modal document extraction |
-| `ci-cd-specialist` | T3 | sonnet | Azure DevOps, Terraform, Databricks Asset Bundles |
+| `ci-cd-specialist` | T3 | sonnet | Azure DevOps, Terraform, Declarative Automation Bundles (ex-DABs) |
 | `supabase-specialist` | T3 | opus | pgvector, RLS, Edge Functions, Auth, Realtime |
 
 ### 3. Platform (6 agents)
@@ -186,7 +187,7 @@ Python development, code quality, and prompt engineering.
 | `code-cleaner` | T2 | sonnet | Clean code, remove redundant comments, apply DRY |
 | `code-documenter` | T2 | sonnet | Generate documentation, READMEs, API docs |
 | `ai-prompt-specialist` | T1 | sonnet | Prompt optimization, structured extraction, few-shot |
-| `llm-specialist` | T3 | opus | Advanced prompt engineering, chain-of-thought, structured output |
+| `llm-specialist` | T3 | opus | Advanced prompt engineering, structured outputs, adaptive thinking |
 
 ### 5. Test (3 agents)
 
@@ -195,8 +196,8 @@ Testing, data quality, and contract validation.
 | Agent | Tier | Model | Purpose |
 |-------|------|-------|---------|
 | `test-generator` | T2 | sonnet | Generate pytest tests with fixtures |
-| `data-quality-analyst` | T2 | sonnet | Great Expectations, dbt tests, data contracts |
-| `data-contracts-engineer` | T2 | sonnet | ODCS, SLAs, schema governance |
+| `data-quality-analyst` | T2 | sonnet | Databricks-native quality, GX Core 1.x, Soda, dbt data tests |
+| `data-contracts-engineer` | T2 | sonnet | ODCS 3.x, datacontract-cli, SLAs, schema governance |
 
 ### 6. Data Engineering (15 agents)
 
@@ -204,7 +205,7 @@ Implementation specialists for data pipelines and processing.
 
 | Agent | Tier | Model | Purpose |
 |-------|------|-------|---------|
-| `dbt-specialist` | T2 | sonnet | dbt models, macros, tests, incremental strategies |
+| `dbt-specialist` | T2 | sonnet | dbt v2 / Core 1.12 models, macros, data tests, incremental strategies, dbt-databricks |
 | `spark-engineer` | T2 | sonnet | PySpark, Spark SQL, distributed processing |
 | `spark-specialist` | T2 | opus | Spark architecture, configuration, performance |
 | `spark-troubleshooter` | T1 | sonnet | Spark debugging -- OOM, data skew, shuffle failures |
@@ -212,12 +213,12 @@ Implementation specialists for data pipelines and processing.
 | `spark-streaming-architect` | T3 | sonnet | Structured Streaming, Kafka, real-time pipelines |
 | `streaming-engineer` | T2 | sonnet | Flink, Kafka, Spark Streaming, CDC |
 | `sql-optimizer` | T2 | sonnet | Query plans, cross-dialect SQL, window functions |
-| `airflow-specialist` | T3 | sonnet | Apache Airflow 3.0, DAGs, TaskFlow API |
+| `airflow-specialist` | T3 | sonnet | Apache Airflow 3.x, DAGs, Task SDK, assets, Deadline Alerts |
 | `lakeflow-architect` | T3 | sonnet | Databricks Lakeflow, Medallion architecture |
-| `lakeflow-expert` | T3 | sonnet | DLT troubleshooting, CDC, SCD Type 2 |
-| `lakeflow-pipeline-builder` | T3 | sonnet | DLT pipeline creation, quality expectations |
+| `lakeflow-expert` | T3 | sonnet | Lakeflow pipelines troubleshooting, AUTO CDC, SCD Type 2 |
+| `lakeflow-pipeline-builder` | T3 | sonnet | Spark Declarative Pipelines creation, expectations |
 | `lakeflow-specialist` | T1 | sonnet | Declarative pipelines, materialized views, streaming tables |
-| `ai-data-engineer` | T2 | sonnet | RAG pipelines, vector DBs, feature stores |
+| `ai-data-engineer` | T2 | sonnet | RAG pipelines, vector DBs, Databricks AI Search, feature stores |
 | `qdrant-specialist` | T3 | opus | Qdrant vector database, collection management |
 
 ### 7. Dev (4 agents)
@@ -267,7 +268,7 @@ Data Engineering <-> Data Engineering:
   dbt-specialist <-> schema-designer (modeling layer)
   pipeline-architect <-> streaming-engineer (batch vs stream)
   lakehouse-architect <-> data-platform-engineer (infra decisions)
-  lakeflow-specialist <-> lakehouse-architect (DLT vs generic Delta)
+  lakeflow-specialist <-> lakehouse-architect (Lakeflow pipelines vs generic Delta)
   medallion-architect <-> schema-designer (layer modeling)
   spark-troubleshooter <-> spark-performance-analyzer (debug vs optimize)
   ai-data-engineer <-> streaming-engineer (real-time embeddings)

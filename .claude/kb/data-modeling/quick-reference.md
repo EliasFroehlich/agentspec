@@ -1,12 +1,14 @@
 # Data Modeling Quick Reference
 
-> Fast lookup tables. For code examples, see linked files.
+> **Purpose**: Fast lookup tables for modeling approach, SCD types, normalization and schema evolution. For code, see linked files.
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Modeling Approach Decision Matrix (2026)
 
 | Approach | Best For | Complexity | Query Speed | Maintenance | Modern Stack Fit |
 |----------|---------|-----------|-------------|-------------|-----------------|
-| Star Schema | BI/analytics with known queries | Low | Fast | Medium | High (+ semantic layer) |
+| Star Schema | BI/analytics with known queries | Low | Fast | Medium | High (+ semantic layer, e.g. UC metric views) |
 | Snowflake Schema | Normalized dimensions, storage-efficient | Medium | Medium | High | Medium |
 | Data Vault 2.0 | Enterprise DWH, many sources, audit | High | Slow (needs marts) | Low (automated) | High (AutomateDV/dbt) |
 | One Big Table (OBT) | Dashboard-specific, high concurrency | Low | Fastest | High (full rebuilds) | High (cloud DWH) |
@@ -34,22 +36,23 @@
 
 ## Schema Evolution Compatibility (Iceberg v3 / Delta 4.x / Avro)
 
-| Change Type | Backward Compatible | Forward Compatible | Iceberg v3 | Delta 4.x | Avro |
+| Change Type | Backward Compatible | Forward Compatible | Iceberg v3 | Delta 4.x / Databricks | Avro |
 |-------------|--------------------|--------------------|-----------|----------|------|
-| Add column (nullable) | Yes | Yes (with default) | `ALTER ADD` | `mergeSchema` | Add with default |
-| Add column (NOT NULL) | Depends | Depends | Requires default | Requires default | Breaking |
-| Drop column | No | Yes | `ALTER DROP` | `overwriteSchema` | Remove with default |
-| Rename column | No | No | `ALTER RENAME` | Column mapping mode | N/A (aliases) |
-| Widen type (int->bigint) | Yes | No | `ALTER TYPE` | Type widening (4.0+) | Promotion rules |
+| Add column (nullable) | Yes | Yes (with default) | `ALTER ADD` | `ALTER TABLE ADD COLUMN`; `MERGE WITH SCHEMA EVOLUTION` (DBR 15.2+); writer `mergeSchema` | Add with default |
+| Add column with default | Yes | Yes | v3 default values | `ADD COLUMN`, then `ALTER COLUMN ... SET DEFAULT` (new rows only) | Add with default |
+| Add column (NOT NULL) | Depends | Depends | Requires default | Add nullable → backfill → `SET NOT NULL` | Breaking |
+| Drop column | No | Yes | `ALTER DROP` | Column mapping + `ALTER TABLE DROP COLUMN` | Remove with default |
+| Rename column | No | No | `ALTER RENAME` | Column mapping + `RENAME COLUMN` | N/A (aliases) |
+| Widen type (int->bigint) | Yes | No | `ALTER TYPE` | Type widening (Delta 4.0 GA; DBR 15.4 LTS+) | Promotion rules |
 | Narrow type (bigint->int) | No | No | Not allowed | Not allowed | Not allowed |
 | Reorder columns | No (cosmetic) | No | Supported | N/A | Positional |
-| Add Variant column | Yes | Yes | v3 native | 4.0+ native | N/A |
+| Add Variant column | Yes | Yes | v3 native | Delta 4.0+, DBR 15.4+ | N/A |
 
 ## Key Design Rules
 
 | Rule | Rationale |
 |------|-----------|
-| Every table has a primary key | Uniqueness guarantee, merge key |
+| Every table has a primary key | Uniqueness guarantee, merge key (on Databricks PK/FK are informational: validate with tests) |
 | Facts have numeric measures | Aggregatable, NOT NULL DEFAULT 0 |
 | Dimensions have surrogate keys | Insulates from source key changes |
 | Date dimension is always separate | Reusable across all facts |
@@ -73,8 +76,16 @@
 |-------|-----|
 | Skip grain definition | Document "one row per ___" on every fact |
 | Nullable fact measures | DEFAULT 0 for numeric measures |
-| Natural keys as PKs | Surrogate keys (hash or sequence, or identity columns in Delta 4.0+) |
-| VARCHAR without limits | Set reasonable max: VARCHAR(256) |
+| Natural keys as PKs | Surrogate keys: hash keys, or identity columns (Delta 3.3+ / DBR 10.4 LTS+) only on single-writer tables — they disable concurrent transactions |
+| Arbitrary `VARCHAR(n)` limits in Spark/Delta | `STRING`; enforce real limits with `CHECK (length(col) <= n)` where needed |
+| `overwriteSchema` to drop or retype columns | Explicit `ALTER TABLE` DDL with column mapping / type widening |
 | OBT as your only model | Use OBT as a mart; keep star schema underneath |
 | Hand-write all Data Vault SQL | Use AutomateDV / dbt macros for Hub/Link/Sat generation |
-| Ignore schema evolution tooling | Use Iceberg/Delta native evolution instead of manual DDL scripts |
+| Ignore schema evolution tooling | Use Iceberg/Delta native evolution, applied through reviewed DDL |
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-alter-table-manage-column
+- https://docs.databricks.com/aws/en/tables/constraints · https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/tables/features/type-widening · https://docs.databricks.com/aws/en/tables/features/column-mapping
+- https://docs.databricks.com/aws/en/sql/language-manual/delta-merge-into · https://iceberg.apache.org/spec/

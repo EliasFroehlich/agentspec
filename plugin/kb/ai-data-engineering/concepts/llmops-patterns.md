@@ -1,148 +1,150 @@
 # LLMOps Patterns
 
-> **Purpose**: Prompt versioning, token economics, guardrails, evaluation, observability (Langfuse, Braintrust)
-> **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Prompt versioning, per-provider token counting and cost tracking, input guardrails, evaluation, and tracing (MLflow 3, Langfuse v5, OpenTelemetry GenAI conventions)
+> **Confidence**: 0.85
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-LLMOps applies MLOps principles to large language model deployments: version prompts like code, track token costs as a first-class metric, enforce guardrails on both input and output, evaluate quality systematically, and observe production behavior with tracing. In 2026, the tooling has matured significantly: Langfuse (OSS, best free tier), Braintrust ($80M raised, best eval pipeline), and LangSmith (LangChain native) are the production standards.
+LLMOps applies MLOps discipline to LLM applications: version prompts like code, count tokens with the provider's own
+counter, track cost per request and per completed task, guard inputs and outputs, evaluate on fixed datasets, and trace
+production traffic. On Databricks the native stack is MLflow 3 (Tracing, `mlflow.genai.evaluate`, Prompt Registry,
+production monitoring) plus Unity Gateway usage tracking; outside it, Langfuse (Python SDK v5, OpenTelemetry-based),
+LangSmith, Arize Phoenix or Braintrust fill the same roles. OpenTelemetry GenAI semantic conventions (now in the
+`semantic-conventions-genai` repository) are the common denominator between them.
 
 ## The Concept
 
 ```python
-# LLMOps: Prompt versioning + guardrails + cost tracking + observability
 from dataclasses import dataclass, field
-from datetime import datetime
-import tiktoken
+from datetime import datetime, timezone
 
-@dataclass
+import anthropic
+
+client = anthropic.Anthropic()
+
+# USD per million tokens (input, output) as of 2026-10-17 -- re-check the provider pricing pages
+PRICES = {
+    "claude-fable-5-1": (10.00, 50.00), "claude-opus-5-5": (4.00, 20.00),
+    "claude-sonnet-5-5": (2.00, 10.00), "claude-haiku-5-5": (0.10, 0.50),   # Haiku 5.5: prompt <= 100K
+    "gpt-6-astra": (10.00, 50.00), "gpt-6.1-sol": (2.00, 10.00), "gpt-6-luna": (0.10, 0.50),
+}
+
+@dataclass(frozen=True)
 class VersionedPrompt:
-    """Prompt with version tracking, cost estimation, and guardrails."""
     name: str
     version: str
-    template: str
-    model: str = "claude-sonnet-4-6"
-    max_input_tokens: int = 4096
-    max_output_tokens: int = 1024
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    system: str
+    model: str = "claude-sonnet-5-5"
+    max_input_tokens: int = 50_000
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-    # Cost per million tokens (input / output) -- March 2026
-    COST_TABLE = {
-        "claude-opus-4-6": (15.00, 75.00),
-        "claude-sonnet-4-6": (3.00, 15.00),
-        "claude-haiku-3-5": (0.80, 4.00),
-        "gpt-4o": (2.50, 10.00),
-        "gpt-4o-mini": (0.15, 0.60),
-        "gemini-2.5-pro": (1.25, 10.00),
-        "gemini-2.0-flash": (0.10, 0.40),
-    }
+    def count_input_tokens(self, user_text: str) -> int:
+        """Provider-side count; tiktoken undercounts Claude tokens and must not be used."""
+        return client.messages.count_tokens(
+            model=self.model, system=self.system,
+            messages=[{"role": "user", "content": user_text}],
+        ).input_tokens
 
-    def estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
-        """Estimate cost in USD for a single call."""
-        input_rate, output_rate = self.COST_TABLE.get(self.model, (0, 0))
-        return (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
+    def cost_usd(self, usage) -> float:
+        """usage: response.usage (thinking tokens are billed as output; cache reads are cheaper)."""
+        price_in, price_out = PRICES[self.model]
+        return (usage.input_tokens * price_in + usage.output_tokens * price_out) / 1_000_000
 
-    def validate_input(self, user_input: str) -> tuple[bool, str]:
-        """Input guardrails: length, injection, PII patterns."""
-        enc = tiktoken.encoding_for_model("gpt-4o")
-        tokens = len(enc.encode(user_input))
-        if tokens > self.max_input_tokens:
-            return False, f"Input too long: {tokens} > {self.max_input_tokens}"
-        injection_patterns = ["ignore previous", "system:", "you are now",
-                              "disregard", "forget your instructions"]
-        for pattern in injection_patterns:
-            if pattern.lower() in user_input.lower():
-                return False, f"Potential prompt injection: '{pattern}'"
-        return True, "OK"
+    def validate_input(self, user_text: str) -> tuple[bool, str]:
+        if (n := self.count_input_tokens(user_text)) > self.max_input_tokens:
+            return False, f"input too long: {n} tokens"
+        if any(p in user_text.lower() for p in ("ignore previous", "you are now", "disregard")):
+            return False, "possible prompt injection"
+        return True, "ok"
 ```
 
-## Observability with Langfuse (2026)
+OpenAI equivalent for counting: `OpenAI().responses.input_tokens.count(model=..., input=..., tools=...)`.
+
+## Tracing
 
 ```python
-from langfuse import Langfuse
-from langfuse.decorators import observe, langfuse_context
+# MLflow 3 (default on Databricks): one line per library, plus @mlflow.trace for your own steps
+import mlflow
 
-langfuse = Langfuse()
+mlflow.anthropic.autolog()          # also mlflow.openai / mlflow.langchain autolog
 
-@observe()  # auto-traces function calls, LLM invocations, costs
+@mlflow.trace
 def rag_pipeline(query: str) -> str:
-    # Langfuse auto-captures: latency, tokens, cost, model
-    chunks = retrieve(query)
-    langfuse_context.update_current_observation(
-        metadata={"num_chunks": len(chunks), "query": query}
-    )
-    answer = generate(query, chunks)
-    # Score the output for quality monitoring
-    langfuse_context.score_current_trace(
-        name="relevancy", value=score_relevancy(query, answer)
-    )
-    return answer
+    chunks = retrieve(query)        # decorate retrieve with @mlflow.trace(span_type="RETRIEVER")
+    return generate(query, chunks)
 ```
+
+```python
+# Langfuse Python SDK v5 (OpenTelemetry-based): get_client(), @observe, propagate_attributes
+from langfuse import get_client, observe, propagate_attributes
+
+langfuse = get_client()
+
+@observe()
+def answer(query: str, user_id: str) -> str:
+    with propagate_attributes(user_id=user_id, metadata={"prompt_version": "2.1.0"}):
+        chunks = retrieve(query)
+        result = generate(query, chunks)
+    langfuse.score_current_trace(name="relevancy", value=score_relevancy(query, result))
+    return result
+
+langfuse.flush()                    # short-lived scripts only
+```
+
+`langfuse.decorators` / `langfuse_context` belong to the v2 SDK; v4 replaced `update_current_trace()` with
+`propagate_attributes()`.
 
 ## Quick Reference
 
-| LLMOps Area | Tools (2026) | Key Metric |
-|-------------|-------------|-----------|
-| Prompt versioning | Git, Langfuse, Humanloop, LangSmith Hub | Prompt version -> quality delta |
-| Token economics | tiktoken, LiteLLM, Langfuse | Cost per query, cost per user |
-| Input guardrails | Llama Guard 4, NeMo, Guardrails AI | Blocked injection rate |
-| Output guardrails | Guardrails AI, LMQL, Pydantic | Hallucination rate, refusal rate |
-| Evaluation | RAGAS, DeepEval, Braintrust | Faithfulness, relevancy, F1 |
-| Observability | Langfuse, Braintrust, LangSmith, Arize | Latency p99, error rate, drift |
-| A/B testing | Braintrust, custom | Win rate, preference score |
-| Cost tracking | Langfuse, Helicone, LiteLLM | Cost per query, budget alerts |
+| Area | Databricks-native | Elsewhere |
+|------|-------------------|-----------|
+| Prompt versioning | MLflow Prompt Registry (`register_prompt`, aliases) | Git, Langfuse prompts, LangSmith |
+| Token counting | Provider counters (`messages.count_tokens`, `responses.input_tokens.count`) | Same |
+| Cost tracking | Unity Gateway usage, `system.billing` tables | Langfuse, provider usage APIs, LiteLLM |
+| Guardrails | Unity Gateway (PII masking, rate limits), `ai_mask` | Llama Guard 4, NeMo Guardrails, Guardrails AI |
+| Evaluation | `mlflow.genai.evaluate` + scorers/judges | RAGAS, DeepEval, Braintrust |
+| Tracing | MLflow Tracing (OTel-compatible), traces in Unity Catalog | Langfuse, LangSmith, Arize Phoenix |
+| Production monitoring | MLflow scorers on sampled traces | Langfuse evaluators, Datadog LLM Observability |
 
-| Eval Metric (RAG) | Measures | Target |
-|--------------------|----------|--------|
-| Faithfulness | Answer grounded in context | > 0.90 |
-| Answer relevancy | Answer addresses the question | > 0.85 |
-| Context precision | Retrieved docs are relevant | > 0.80 |
-| Context recall | All needed info was retrieved | > 0.80 |
-| Hallucination | Unsupported claims | < 0.20 |
-
-## Model Pricing (March 2026)
-
-| Model | Input/1M | Output/1M | Context | Strength |
-|-------|---------|----------|---------|----------|
-| Claude Opus 4.6 | $15 | $75 | 1M | Best agents, complex reasoning |
-| Claude Sonnet 4.6 | $3 | $15 | 1M | Best cost/quality ratio |
-| Claude Haiku 3.5 | $0.80 | $4 | 200K | Fastest, cheapest Claude |
-| GPT-4o | $2.50 | $10 | 128K | Strong multimodal, tool use |
-| GPT-4o-mini | $0.15 | $0.60 | 128K | Cheapest quality option |
-| Gemini 2.5 Pro | $1.25 | $10 | 1M | Thinking model, code |
-| Gemini 2.0 Flash | $0.10 | $0.40 | 1M | Cheapest, fastest |
+| RAG metric | Measures | Typical target |
+|------------|----------|----------------|
+| Groundedness / faithfulness | Answer supported by context | > 0.90 |
+| Relevance | Answer addresses the question | > 0.85 |
+| Context precision / relevance | Retrieved chunks are relevant | > 0.80 |
+| Context recall / sufficiency | Needed facts were retrieved | > 0.80 |
 
 ## Common Mistakes
 
 ### Wrong
+
 ```python
-# Hardcoded prompts with no versioning, cost tracking, or observability
-response = llm.chat("You are a helpful assistant. Answer: " + user_query)
+import tiktoken
+tokens = len(tiktoken.encoding_for_model("gpt-4o").encode(prompt))   # wrong tokenizer for Claude
+cost = tokens * 15 / 1e6                                              # stale price table
 ```
 
 ### Correct
-```python
-# Versioned prompt with Langfuse observability
-from langfuse.decorators import observe
 
-@observe()
-def answer_query(user_query: str) -> str:
-    prompt = VersionedPrompt(
-        name="rag-answer", version="2.1.0",
-        template="Answer based on context:\n{context}\n\nQuestion: {question}",
-        model="claude-sonnet-4-6",
-    )
-    valid, msg = prompt.validate_input(user_query)
-    if not valid:
-        return fallback_response(msg)
-    response = llm.chat(prompt.template.format(context=ctx, question=user_query))
-    cost = prompt.estimate_cost(input_tokens=850, output_tokens=200)
-    return response
+```python
+p = VersionedPrompt(name="rag-answer", version="2.1.0", system=SYSTEM)
+resp = client.messages.create(model=p.model, max_tokens=16000, system=p.system,
+                              messages=[{"role": "user", "content": question}])
+log_metrics(prompt=f"{p.name}@{p.version}", cost_usd=p.cost_usd(resp.usage),
+            cache_read_tokens=resp.usage.cache_read_input_tokens)
 ```
 
 ## Related
 
 - [rag-pipelines](../concepts/rag-pipelines.md)
-- [feature-stores](../concepts/feature-stores.md)
-- [rag-pipeline-implementation](../patterns/rag-pipeline-implementation.md)
+- [Evaluation Framework](../../genai/patterns/evaluation-framework.md)
+- [Prompt Template Pattern](../../prompt-engineering/patterns/prompt-template.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/token-counting
+- https://platform.claude.com/docs/en/about-claude/pricing ; https://platform.openai.com/docs/models
+- https://mlflow.org/docs/latest/genai/tracing/ ; https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/
+- https://langfuse.com/docs/observability/sdk/python/overview
+- https://langfuse.com/docs/observability/sdk/upgrade-path/python-v3-to-v4
+- https://opentelemetry.io/docs/specs/semconv/gen-ai/ (moved to github.com/open-telemetry/semantic-conventions-genai)

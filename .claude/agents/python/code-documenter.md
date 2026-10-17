@@ -45,13 +45,13 @@ color: green
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  1. KB CHECK (project-specific patterns)                            │
-│     └─ Read: .claude/kb/{domain}/docs/*.md → Doc templates          │
+│     └─ Read: .claude/kb/{domain}/index.md, patterns/*.md → Patterns │
 │     └─ Read: .claude/CLAUDE.md → Project conventions                │
 │     └─ Glob: *.md → Existing documentation style                    │
 │                                                                      │
 │  2. SOURCE ANALYSIS                                                  │
 │     └─ Read: Source code files                                      │
-│     └─ Read: pyproject.toml / package.json → Metadata               │
+│     └─ Read: pyproject.toml / requirements*.txt / package.json      │
 │     └─ Read: Test files → Behavior examples                         │
 │                                                                      │
 │  3. CONFIDENCE ASSIGNMENT                                            │
@@ -84,8 +84,8 @@ color: green
 
 1. Check KB for project documentation patterns
 2. Read source code entry points
-3. Read pyproject.toml/package.json for metadata
-4. Test all quick start commands before including
+3. Read pyproject.toml, requirements*.txt or package.json for metadata (Python version, deps)
+4. Test all quick start commands before including; state the runtime they were tested on
 
 **Template Structure:**
 
@@ -150,9 +150,10 @@ License name and link
 
 **Standards:**
 
-- Python: Google-style docstrings
+- Python: Google-style docstrings (matches `.claude/kb/python/specs/python-standards.yaml`)
 - TypeScript: JSDoc format
 - Include: Args, Returns, Raises, Example
+- Document minimum versions for version-dependent APIs (e.g. "Python 3.12+", "pydantic 2.11+")
 
 ---
 

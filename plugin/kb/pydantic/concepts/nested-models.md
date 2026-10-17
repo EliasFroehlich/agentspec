@@ -2,7 +2,7 @@
 
 > **Purpose**: Composing hierarchical data structures with nested Pydantic models
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -14,24 +14,25 @@ parent model raises a ValidationError with the full path to the error.
 ## The Pattern
 
 ```python
-from pydantic import BaseModel, Field
-from typing import Optional
 from datetime import date
+
+from pydantic import BaseModel, Field, computed_field
 
 
 class Address(BaseModel):
-    street: str = Field(..., description="Street address")
-    city: str = Field(..., description="City name")
-    state: Optional[str] = None
-    postal_code: str = Field(..., description="Postal/ZIP code")
+    street: str = Field(description="Street address")
+    city: str = Field(description="City name")
+    state: str | None = None
+    postal_code: str = Field(min_length=1, description="Postal/ZIP code")
     country: str = Field(default="US", description="ISO country code")
 
 
 class LineItem(BaseModel):
-    description: str = Field(..., min_length=1)
+    description: str = Field(min_length=1)
     quantity: int = Field(default=1, ge=1)
-    unit_price: float = Field(..., gt=0)
+    unit_price: float = Field(gt=0)
 
+    @computed_field   # unlike a bare @property, included in model_dump() and the JSON schema
     @property
     def total(self) -> float:
         return round(self.quantity * self.unit_price, 2)
@@ -41,11 +42,12 @@ class Invoice(BaseModel):
     invoice_number: str
     vendor_name: str
     vendor_address: Address
-    billing_address: Optional[Address] = None
-    line_items: list[LineItem] = Field(..., min_length=1)
+    billing_address: Address | None = None
+    line_items: list[LineItem] = Field(min_length=1)
     issue_date: date
-    notes: Optional[str] = None
+    notes: str | None = None
 
+    @computed_field
     @property
     def total_amount(self) -> float:
         return round(sum(item.total for item in self.line_items), 2)
@@ -56,7 +58,7 @@ class Invoice(BaseModel):
 | Pattern | Syntax | Validates |
 |---------|--------|-----------|
 | Required nested | `address: Address` | Must provide valid Address |
-| Optional nested | `address: Optional[Address] = None` | Can be None |
+| Optional nested | `address: Address \| None = None` | Can be None |
 | List of models | `items: list[LineItem]` | Each item validated |
 | Dict with models | `data: dict[str, LineItem]` | Values validated |
 | Nested in nested | `order: Order` (Order has Address) | Recursive validation |
@@ -88,6 +90,7 @@ invoice = Invoice.model_validate_json(llm_response)
 print(invoice.vendor_address.city)   # "Springfield"
 print(invoice.line_items[0].total)   # 99.95
 print(invoice.total_amount)          # 199.93
+print(invoice.model_dump()["line_items"][0]["total"])   # 99.95 -- computed fields serialize
 ```
 
 ## Error Paths in Nested Models
@@ -117,8 +120,8 @@ class Invoice(BaseModel):
     vendor_street: str
     vendor_city: str
     vendor_postal: str
-    billing_street: Optional[str] = None
-    billing_city: Optional[str] = None
+    billing_street: str | None = None
+    billing_city: str | None = None
 ```
 
 ### Correct (nested, reusable models)
@@ -131,7 +134,7 @@ class Address(BaseModel):
 
 class Invoice(BaseModel):
     vendor_address: Address
-    billing_address: Optional[Address] = None
+    billing_address: Address | None = None
 ```
 
 ## Related
@@ -139,3 +142,8 @@ class Invoice(BaseModel):
 - [BaseModel](../concepts/base-model.md)
 - [Field Types](../concepts/field-types.md)
 - [Extraction Schema](../patterns/extraction-schema.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/concepts/models/
+- https://docs.pydantic.dev/latest/concepts/fields/

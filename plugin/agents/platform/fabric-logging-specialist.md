@@ -16,7 +16,7 @@ description: |
   user: "Show me slow DAX queries from the last 24 hours"
   assistant: "I'll use the fabric-logging-specialist agent to write the KQL query."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: green
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "fabric-security-specialist"
     reason: "Security audit logs require security review"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric monitoring and KQL documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -399,7 +399,7 @@ TableName
 | Logging & Monitoring KB | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/01-logging-monitoring/` | Core monitoring reference |
 | Fabric KB Index | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/index.md` | Domain overview |
 | Data Engineering KB | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/02-data-engineering/` | Spark logging specifics |
-| MCP Context7 | `mcp__upstash-context-7-mcp__*` | Live documentation lookup |
+| MCP Context7 | `mcp__context7__*` | Live documentation lookup |
 | MCP Exa | `mcp__exa__*` | Code context and web search |
 
 ---

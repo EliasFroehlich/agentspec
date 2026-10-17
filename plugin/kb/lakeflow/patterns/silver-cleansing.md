@@ -1,162 +1,109 @@
 # Silver Cleansing Patterns
 
-> **MCP Validated**: 2025-01-19
-> **Source**: https://docs.databricks.com/aws/en/dlt/expectations
+> **Purpose**: Typed, validated, de-duplicated silver datasets: casting, PII handling, bounded-state dedup, keep-latest
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Silver Layer Purpose
+## When to Use
 
-Transform Bronze raw data into clean, typed, validated data:
+- Turning bronze rows (often strings) into typed columns with explicit rules
+- Removing or masking PII before data reaches consumers
+- De-duplicating a stream or keeping only the latest version of each key
 
-1. **Type Casting** - Enforce correct data types
-2. **Null Handling** - Apply defaults or filter
-3. **PII Protection** - Mask or exclude sensitive fields
-4. **Deduplication** - Remove duplicate records
-5. **Standardization** - Normalize formats
-
-## MDI Silver Pattern
+## Implementation
 
 ```python
-import dlt
+from pyspark import pipelines as dp
 from pyspark.sql import functions as F
-from pyspark.sql.types import DecimalType, DateType
-
-@dlt.table(
-    name="mdi_silver",
-    comment="Cleaned MDI merchant data",
-    table_properties={
-        "quality": "silver",
-        "pipelines.autoOptimize.managed": "true"
-    }
-)
-@dlt.expect_or_drop("valid_merchant", "merchant_number IS NOT NULL")
-@dlt.expect_or_drop("valid_status", "status IN ('A', 'C', 'D', 'I')")
-@dlt.expect("has_bank_number", "bank_number IS NOT NULL")
-def mdi_silver():
-    return (
-        dlt.read_stream("mdi_bronze")
-        .select(
-            F.col("merchant_number").cast("string"),
-            F.col("merchant_name").cast("string"),
-            F.col("bank_number").cast("string"),
-            F.col("status").cast("string"),
-            F.col("effective_date").cast(DateType()),
-            F.col("dba_name").cast("string"),
-            F.col("_ingested_at"),
-            F.col("_source_file")
-        )
-        .withColumn("_cleaned_at", F.current_timestamp())
-    )
-```
-
-## TDDF Silver Pattern (Amount Handling)
-
-```python
-@dlt.table(name="tddf_transactions_silver")
-@dlt.expect_or_drop("valid_amount", "transaction_amount IS NOT NULL")
-@dlt.expect_or_drop("valid_merchant", "merchant_number IS NOT NULL")
-@dlt.expect("amount_positive", "transaction_amount >= 0 OR dc_indicator = 'C'")
-def tddf_transactions_silver():
-    return (
-        dlt.read_stream("tddf_transactions_bronze")
-        .select(
-            F.col("merchant_number"),
-            F.col("transaction_date").cast(DateType()),
-            F.col("transaction_amount").cast(DecimalType(18, 2)),
-            F.col("dc_indicator"),
-            F.col("card_type"),
-            F.col("authorization_code"),
-            F.when(F.col("dc_indicator") == "C", -F.col("transaction_amount"))
-             .otherwise(F.col("transaction_amount"))
-             .alias("signed_amount"),
-            F.col("_ingested_at")
-        )
-        .withColumn("_cleaned_at", F.current_timestamp())
-    )
-```
-
-## PII Handling Patterns
-
-### Exclude PII Columns
-
-```python
-@dlt.table(name="mdi_silver_no_pii")
-def mdi_silver_no_pii():
-    return (
-        dlt.read_stream("mdi_bronze")
-        .drop("owner_ssn", "tax_id", "bank_account_number")
-        .withColumn("_cleaned_at", F.current_timestamp())
-    )
-```
-
-### Mask PII Columns
-
-```python
-@dlt.table(name="mdi_silver_masked")
-def mdi_silver_masked():
-    return (
-        dlt.read_stream("mdi_bronze")
-        .withColumn(
-            "tax_id_masked",
-            F.concat(F.lit("***-**-"), F.substring(F.col("tax_id"), -4, 4))
-        )
-        .withColumn(
-            "card_number_masked",
-            F.concat(F.lit("****-****-****-"), F.substring(F.col("card_number"), -4, 4))
-        )
-        .drop("tax_id", "card_number")
-    )
-```
-
-## Deduplication Patterns
-
-### Simple Deduplication
-
-```python
-@dlt.table(name="mdi_silver_deduped")
-def mdi_silver_deduped():
-    return (
-        dlt.read_stream("mdi_bronze")
-        .dropDuplicates(["merchant_number", "effective_date"])
-    )
-```
-
-### Keep Latest Record
-
-```python
+from pyspark.sql.types import DecimalType
 from pyspark.sql.window import Window
 
-@dlt.table(name="mdi_silver_latest")
-def mdi_silver_latest():
-    window = Window.partitionBy("merchant_number").orderBy(F.desc("_ingested_at"))
-    return (
-        dlt.read("mdi_bronze")
-        .withColumn("_rank", F.row_number().over(window))
-        .filter(F.col("_rank") == 1)
-        .drop("_rank")
-    )
+# Typed silver stream with drop rules
+@dp.table(name="orders_silver", comment="Typed, validated orders",
+          table_properties={"quality": "silver"}, cluster_by=["order_date"])
+@dp.expect_or_drop("valid_order_id", "order_id IS NOT NULL")
+@dp.expect_or_drop("valid_status", "status IN ('NEW', 'PAID', 'SHIPPED', 'CANCELLED')")
+@dp.expect("has_customer", "customer_id IS NOT NULL")
+def orders_silver():
+    return (spark.readStream.table("orders_bronze")
+            .select(
+                F.col("order_id").cast("bigint"),
+                F.col("customer_id").cast("bigint"),
+                F.upper(F.trim("status")).alias("status"),
+                F.col("amount").cast(DecimalType(18, 2)),
+                F.to_timestamp("order_ts", "yyyy-MM-dd HH:mm:ss").alias("order_ts"),
+                F.to_date("order_ts").alias("order_date"),
+                "_source_file", "_ingested_at",
+            ))
+
+# PII: drop or mask before publishing
+@dp.table(name="customers_silver", comment="Customers without raw PII")
+def customers_silver():
+    return (spark.readStream.table("customers_bronze")
+            .withColumn("tax_id_masked",
+                        F.concat(F.lit("***-**-"), F.substring("tax_id", -4, 4)))
+            .withColumn("email_hash", F.sha2(F.lower("email"), 256))
+            .drop("tax_id", "email", "phone"))
+
+# Streaming dedup with bounded state: watermark + dropDuplicatesWithinWatermark
+@dp.table(name="events_dedup")
+def events_dedup():
+    return (spark.readStream.table("events_bronze")
+            .withWatermark("event_ts", "1 hour")
+            .dropDuplicatesWithinWatermark(["event_id"]))
+
+# Keep the latest row per key: batch window in a materialized view
+@dp.materialized_view(name="customers_latest")
+def customers_latest():
+    w = Window.partitionBy("customer_id").orderBy(F.desc("_ingested_at"))
+    return (spark.read.table("customers_silver")
+            .withColumn("_rn", F.row_number().over(w))
+            .where("_rn = 1").drop("_rn"))
+
 ```
 
-## Data Quality Strategy (Silver)
+## Configuration
 
-Silver layer uses DROP to remove invalid records:
+| Need | Pattern | Why |
+|------|---------|-----|
+| Cast strings | `.cast(...)`, `to_timestamp`, `to_date` | Explicit types; ANSI mode errors on bad casts (use `try_cast` when bad values are expected) |
+| Validate | `@dp.expect_or_drop` / `@dp.expect` | Drop technical garbage, warn on soft rules |
+| Dedup a stream | `withWatermark` + `dropDuplicatesWithinWatermark` | `dropDuplicates` on a stream without a watermark keeps unbounded state |
+| Latest per key, append feed | Materialized view with `row_number()` | Window functions refresh incrementally only with `PARTITION BY` |
+| Latest per key, CDC feed | `AUTO CDC ... STORED AS SCD TYPE 1` | Handles out-of-order events and deletes |
+| Column masking for readers | UC column masks in the table definition | Applied at query time with the reader's identity |
+
+## Example Usage
 
 ```python
-@dlt.expect_or_drop("not_null_key", "merchant_number IS NOT NULL")
-@dlt.expect_or_drop("valid_date", "transaction_date >= '2020-01-01'")
-@dlt.expect_or_drop("valid_amount", "amount > 0")
+# Wrong: unbounded streaming state
+spark.readStream.table("events_bronze").dropDuplicates(["event_id"])
+
+# Correct
+(spark.readStream.table("events_bronze")
+    .withWatermark("event_ts", "1 hour")
+    .dropDuplicatesWithinWatermark(["event_id"]))
 ```
 
-## Type Casting Reference
+| Source type | Target type | Expression |
+|-------------|-------------|------------|
+| String amount | Decimal | `F.col("amount").cast(DecimalType(18, 2))` |
+| String date | Date | `F.to_date("d", "yyyy-MM-dd")` |
+| String timestamp | Timestamp | `F.to_timestamp("ts", "yyyyMMddHHmmss")` |
+| Null default | Same | `F.coalesce("c", F.lit(0))` |
 
-| Source Type | Target Type | Pattern |
-|-------------|-------------|---------|
-| String amount | Decimal | `.cast(DecimalType(18, 2))` |
-| String date | Date | `.cast(DateType())` |
-| String timestamp | Timestamp | `F.to_timestamp(col, 'yyyyMMddHHmmss')` |
-| Null handling | Default | `F.coalesce(col, F.lit(default))` |
+## See Also
 
-## Related
+- [Bronze ingestion](bronze-ingestion.md)
+- [Gold aggregation](gold-aggregation.md)
+- [Stateful processing](../reference/stateful-processing.md)
+- [Advanced expectations](expectations-advanced.md)
 
-- [Bronze Ingestion](bronze-ingestion.md) - Previous layer
-- [Gold Aggregation](gold-aggregation.md) - Next layer
-- [Expectations Advanced](expectations-advanced.md) - Complex validations
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/stateful-processing
+- https://docs.databricks.com/aws/en/ldp/expectations
+- https://docs.databricks.com/aws/en/ldp/incremental-refresh
+- https://docs.databricks.com/aws/en/ldp/cdc
+- https://docs.databricks.com/aws/en/ldp/unity-catalog
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-ansi-compliance
