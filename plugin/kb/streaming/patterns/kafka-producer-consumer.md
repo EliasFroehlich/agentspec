@@ -1,20 +1,17 @@
 # Kafka Producer & Consumer
 
-> **Purpose**: Idempotent producer, consumer groups, DLQ, exactly-once transactions
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Idempotent producer, consumer groups (KIP-848 protocol), DLQ, share consumers (Kafka 4.2+)
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Production Kafka patterns for Python using confluent-kafka: idempotent producers (prevent duplicates), consumer groups with manual commit (at-least-once), dead letter queues for poison messages, and exactly-once transactional processing.
+Production Kafka patterns for Python using confluent-kafka: idempotent producers (prevent duplicates), consumer groups with manual commit (at-least-once) on the KIP-848 `consumer` protocol, dead letter queues for poison messages, and share consumers for queue-style work distribution.
 
 ## The Pattern
 
 ```python
 from confluent_kafka import Producer, Consumer, KafkaError
-from confluent_kafka.serialization import SerializationContext, MessageField
-from confluent_kafka.schema_registry import SchemaRegistryClient
-from confluent_kafka.schema_registry.json_schema import JSONSerializer
 import json, logging
 
 logger = logging.getLogger(__name__)
@@ -59,10 +56,12 @@ producer.flush()  # wait for all messages to be delivered
 consumer_config = {
     "bootstrap.servers": "kafka:9092",
     "group.id": "order-processor",
+    "group.protocol": "consumer",      # KIP-848 (broker 4.0+, librdkafka 2.12+ GA); default is "classic"
     "auto.offset.reset": "earliest",
     "enable.auto.commit": False,       # manual commit for at-least-once
     "max.poll.interval.ms": 300000,
-    "session.timeout.ms": 45000,
+    # with group.protocol=consumer do NOT set session.timeout.ms, heartbeat.interval.ms or
+    # partition.assignment.strategy: they are broker/group configs (group.consumer.*) now
 }
 
 consumer = Consumer(consumer_config)
@@ -112,9 +111,54 @@ def process_messages(max_messages: int = 1000) -> None:
 | `auto.offset.reset` | `earliest` | Start from beginning for new groups |
 | `compression.type` | `zstd` | Best ratio/speed for most workloads |
 | `linger.ms` | `10-50` | Batch messages for throughput |
+| `group.protocol` | `consumer` | KIP-848 incremental rebalances; GA in Kafka 4.0 brokers, opt-in on clients |
+| `share.acknowledgement.mode` | `implicit` / `explicit` | Share consumers only (Java GA in 4.2; Python preview) |
+
+## Share Consumer (Kafka 4.2+)
+
+```java
+// Java client: share groups are production-ready in Apache Kafka 4.2
+Properties props = new Properties();
+props.setProperty("bootstrap.servers", "kafka:9092");
+props.setProperty("group.id", "order-workers");               // a share group
+props.setProperty("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+props.setProperty("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+props.setProperty("share.acknowledgement.mode", "explicit");
+
+try (KafkaShareConsumer<String, String> consumer = new KafkaShareConsumer<>(props)) {
+    consumer.subscribe(List.of("orders"));
+    while (running) {
+        for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(1000))) {
+            try {
+                handleOrder(record.value());
+                consumer.acknowledge(record, AcknowledgeType.ACCEPT);
+            } catch (RetryableBusinessException e) {                     // your own exception type
+                consumer.acknowledge(record, AcknowledgeType.RELEASE);   // redeliver later
+            } catch (Exception e) {
+                consumer.acknowledge(record, AcknowledgeType.REJECT);    // poison: stop redelivery
+            }
+        }
+        consumer.commitSync();
+    }
+}
+```
+
+Python: `confluent_kafka.ShareConsumer` arrived in confluent-kafka-python 2.15.0 as a **Preview** (not for
+production; no RENEW yet). Lock duration, delivery-count limit and offset reset are group configs set on
+the broker (`kafka-configs.sh --entity-type groups`), not client properties.
 
 ## Related
 
 - [kafka-fundamentals concept](../concepts/kafka-fundamentals.md)
 - [cdc-patterns](cdc-patterns.md)
 - [flink-sql-patterns](flink-sql-patterns.md)
+
+## Sources
+
+- https://kafka.apache.org/40/operations/consumer-rebalance-protocol/
+- https://kafka.apache.org/43/generated/consumer_config.html
+- https://kafka.apache.org/42/javadoc/org/apache/kafka/clients/consumer/KafkaShareConsumer.html
+- https://kafka.apache.org/42/getting-started/upgrade/
+- https://github.com/confluentinc/librdkafka/releases/tag/v2.12.0
+- https://github.com/confluentinc/confluent-kafka-python/releases/tag/v2.15.0
+- https://docs.confluent.io/kafka-clients/python/current/overview.html

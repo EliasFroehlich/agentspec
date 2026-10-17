@@ -14,7 +14,7 @@ description: Intelligent agent routing -- automatically matches tasks to the bes
 
 Explicit routing rules for matching tasks to the correct specialist agent. Generated from each agent's frontmatter, so any change to an agent's `description`, `kb_domains`, or `escalation_rules` flows here automatically.
 
-**Agent count:** 59  |  **Categories:** 8  |  **Content hash:** `328fd464f392`
+**Agent count:** 59  |  **Categories:** 8  |  **Content hash:** `6b361b3ba14f`
 
 ## A. Agents by Category
 
@@ -30,7 +30,7 @@ Explicit routing rules for matching tasks to the correct specialist agent. Gener
 | `lakehouse-architect` | T2 | sonnet | `lakehouse`, `spark`, `data-modeling` | `data-platform-engineer`, `spark-engineer`, `schema-designer` |
 | `medallion-architect` | T1 | sonnet | `medallion`, `data-modeling`, `lakehouse`, `data-quality` | — |
 | `pipeline-architect` | T2 | sonnet | `airflow`, `data-quality`, `dbt` | `dbt-specialist`, `spark-engineer`, `streaming-engineer` |
-| `schema-designer` | T2 | sonnet | `data-modeling`, `sql-patterns`, `data-quality` | `dbt-specialist`, `lakehouse-architect`, `data-quality-analyst`, `sql-optimizer` |
+| `schema-designer` | T2 | sonnet | `data-modeling`, `sql-patterns`, `data-quality`, `metric-views` | `dbt-specialist`, `lakehouse-architect`, `data-quality-analyst`, `sql-optimizer` |
 | `the-planner` | T2 | opus | — | `user` |
 
 ### Cloud & Infrastructure
@@ -61,7 +61,7 @@ Explicit routing rules for matching tasks to the correct specialist agent. Gener
 | `lakeflow-expert` | T3 | sonnet | `lakeflow`, `lakehouse`, `data-quality`, `medallion` | `spark-engineer`, `airflow-specialist`, `schema-designer` |
 | `lakeflow-pipeline-builder` | T3 | sonnet | `lakeflow`, `lakehouse`, `data-quality`, `medallion` | `spark-engineer`, `airflow-specialist`, `schema-designer` |
 | `lakeflow-specialist` | T1 | sonnet | `lakeflow`, `lakehouse`, `spark`, `data-quality` | — |
-| `qdrant-specialist` | T3 | opus | `ai-data-engineering`, `genai` | `ai-data-engineer`, `spark-engineer`, `ai-data-engineer` |
+| `qdrant-specialist` | T3 | opus | `ai-data-engineering`, `genai` | `ai-data-engineer`, `spark-engineer`, `ai-data-engineer`, `ai-data-engineer` |
 | `spark-engineer` | T2 | sonnet | `spark`, `sql-patterns`, `streaming` | `pipeline-architect`, `dbt-specialist`, `lakehouse-architect` |
 | `spark-performance-analyzer` | T1 | sonnet | `spark`, `cloud-platforms`, `lakehouse` | — |
 | `spark-specialist` | T2 | opus | `spark`, `sql-patterns`, `cloud-platforms` | `pipeline-architect`, `dbt-specialist`, `lakehouse-architect` |
@@ -100,7 +100,7 @@ Explicit routing rules for matching tasks to the correct specialist agent. Gener
 | `ai-prompt-specialist` | T1 | sonnet | `prompt-engineering`, `pydantic`, `genai` | — |
 | `code-cleaner` | T2 | sonnet | `python` | — |
 | `code-documenter` | T2 | sonnet | `python` | — |
-| `code-reviewer` | T2 | sonnet | `data-quality`, `sql-patterns`, `dbt` | — |
+| `code-reviewer` | T2 | sonnet | `python`, `testing`, `pydantic`, `data-quality`, `sql-patterns`, `dbt` | — |
 | `llm-specialist` | T3 | opus | `prompt-engineering`, `pydantic`, `genai` | — |
 | `python-developer` | T1 | sonnet | `python`, `pydantic`, `testing` | — |
 
@@ -111,7 +111,7 @@ Explicit routing rules for matching tasks to the correct specialist agent. Gener
 |-------|------|-------|-----------|--------------|
 | `data-contracts-engineer` | T2 | sonnet | `data-quality`, `data-modeling` | `data-quality-analyst`, `schema-designer`, `dbt-specialist` |
 | `data-quality-analyst` | T2 | sonnet | `data-quality`, `dbt`, `data-modeling` | `dbt-specialist`, `schema-designer`, `data-contracts-engineer` |
-| `test-generator` | T2 | sonnet | `data-quality`, `dbt`, `testing` | `schema-designer`, `dbt-specialist`, `data-quality-analyst` |
+| `test-generator` | T2 | sonnet | `testing`, `python`, `data-quality`, `dbt` | `schema-designer`, `dbt-specialist`, `data-quality-analyst` |
 
 ### SDD Workflow
 *Brainstorm, Define, Design, Build, Ship, Iterate*
@@ -143,16 +143,17 @@ Which agents know which domain. Use this when the user names a technology.
 | `lakeflow` | `ci-cd-specialist`, `lakeflow-architect`, `lakeflow-expert`, `lakeflow-pipeline-builder`, `lakeflow-specialist` |
 | `lakehouse` | `data-platform-engineer`, `lakeflow-architect`, `lakeflow-expert`, `lakeflow-pipeline-builder`, `lakeflow-specialist`, `lakehouse-architect`, `medallion-architect`, `spark-performance-analyzer`, `spark-streaming-architect` |
 | `medallion` | `lakeflow-architect`, `lakeflow-expert`, `lakeflow-pipeline-builder`, `medallion-architect` |
+| `metric-views` | `schema-designer` |
 | `microsoft-fabric` | `fabric-ai-specialist`, `fabric-architect`, `fabric-cicd-specialist`, `fabric-logging-specialist`, `fabric-pipeline-developer`, `fabric-security-specialist` |
 | `prompt-engineering` | `ai-prompt-specialist`, `ai-prompt-specialist-gcp`, `genai-architect`, `llm-specialist` |
-| `pydantic` | `ai-prompt-specialist`, `ai-prompt-specialist-gcp`, `llm-specialist`, `python-developer` |
-| `python` | `code-cleaner`, `code-documenter`, `lambda-builder`, `prompt-crafter`, `python-developer` |
+| `pydantic` | `ai-prompt-specialist`, `ai-prompt-specialist-gcp`, `code-reviewer`, `llm-specialist`, `python-developer` |
+| `python` | `code-cleaner`, `code-documenter`, `code-reviewer`, `lambda-builder`, `prompt-crafter`, `python-developer`, `test-generator` |
 | `spark` | `lakeflow-architect`, `lakeflow-specialist`, `lakehouse-architect`, `spark-engineer`, `spark-performance-analyzer`, `spark-specialist`, `spark-streaming-architect`, `spark-troubleshooter`, `streaming-engineer` |
 | `sql-patterns` | `airflow-specialist`, `code-reviewer`, `dbt-specialist`, `schema-designer`, `spark-engineer`, `spark-specialist`, `spark-troubleshooter`, `sql-optimizer`, `streaming-engineer` |
 | `streaming` | `ai-data-engineer`, `spark-engineer`, `spark-streaming-architect`, `streaming-engineer` |
 | `supabase` | `supabase-specialist` |
 | `terraform` | `ai-data-engineer-cloud`, `ai-data-engineer-gcp`, `aws-data-architect`, `aws-deployer`, `aws-lambda-architect`, `ci-cd-specialist`, `gcp-data-architect` |
-| `testing` | `lambda-builder`, `python-developer`, `test-generator` |
+| `testing` | `code-reviewer`, `lambda-builder`, `python-developer`, `test-generator` |
 ## C. Agent One-Liners
 
 Single-sentence purpose per agent, derived from frontmatter `description`.
@@ -163,21 +164,21 @@ Single-sentence purpose per agent, derived from frontmatter `description`.
 - **`ai-data-engineer-gcp`** — Elite GCP Data Engineering architect for serverless architectures, AI/ML pipelines, and document processing.
 - **`ai-prompt-specialist`** — Prompt engineering specialist for LLMs — extraction, structured output, chain-of-thought, few-shot.
 - **`ai-prompt-specialist-gcp`** — Elite Prompt Engineering architect for Google Gemini, Vertex AI, and multi-modal document extraction systems. Masters structured extraction, OCR optimization, and production prompt pipelines. Uses KB + MCP validation.
-- **`airflow-specialist`** — Apache Airflow 3.0 SME for DAG development, asset-aware scheduling, and event-driven pipelines.
+- **`airflow-specialist`** — Apache Airflow 3.x SME for DAG development, asset-aware scheduling, and event-driven pipelines.
 - **`aws-data-architect`** — AWS data architecture specialist for Lambda, S3, Glue, Redshift, MWAA, and serverless data pipelines.
 - **`aws-deployer`** — Executes AWS CLI and SAM CLI deployment commands with validation. Uses KB + MCP validation for safe deployments.
 - **`aws-lambda-architect`** — Creates SAM templates with embedded least-privilege IAM policies. Uses KB + MCP validation for secure Lambda deployments.
 - **`brainstorm-agent`** — Collaborative exploration specialist for clarifying intent and approach (Phase 0).
 - **`build-agent`** — Implementation executor with agent delegation (Phase 3).
-- **`ci-cd-specialist`** — DevOps expert for Azure DevOps, Terraform, and Databricks Asset Bundles. Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.
+- **`ci-cd-specialist`** — DevOps expert for Azure DevOps, Terraform, and Declarative Automation Bundles (DABs, formerly Databricks Asset Bundles). Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.
 - **`code-cleaner`** — Python code cleaning specialist for removing noise and applying modern patterns.
 - **`code-documenter`** — Documentation specialist for creating comprehensive, production-ready documentation.
 - **`code-reviewer`** — Expert code review specialist ensuring quality, security, and maintainability.
 - **`codebase-explorer`** — Elite codebase analyst delivering Executive Summaries + Deep Dives.
 - **`data-contracts-engineer`** — Data contract specialist for ODCS, SLA enforcement, schema governance, and producer-consumer agreements.
 - **`data-platform-engineer`** — Cloud data platform specialist for Snowflake, Databricks, BigQuery, and infrastructure decisions.
-- **`data-quality-analyst`** — Data quality specialist for Great Expectations, Soda, dbt tests, data contracts, and observability.
-- **`dbt-specialist`** — dbt Core and dbt Cloud specialist for model development, testing, macros, and project management.
+- **`data-quality-analyst`** — Data quality specialist for Databricks-native quality (expectations, constraints, data quality monitoring), Great Expectations, Soda, pandera, dbt tests, data contracts, and observability.
+- **`dbt-specialist`** — dbt specialist (dbt v1 and v2, dbt platform, dbt-databricks) for model development, testing, macros, and project management.
 - **`define-agent`** — Requirements extraction and validation specialist (Phase 1).
 - **`design-agent`** — Architecture and technical specification specialist (Phase 2).
 - **`fabric-ai-specialist`** — Expert in Microsoft Fabric AI capabilities - Copilot, ML models, AI Skills, and Azure OpenAI integration.
@@ -190,10 +191,10 @@ Single-sentence purpose per agent, derived from frontmatter `description`.
 - **`genai-architect`** — GenAI Systems Architect for multi-agent orchestration, agentic workflows, and production AI systems.
 - **`iterate-agent`** — Cross-phase document updater with cascade awareness (All Phases).
 - **`kb-architect`** — Knowledge base architect for creating validated, structured KB domains.
-- **`lakeflow-architect`** — Databricks Lakeflow expert for building Medallion architecture pipelines. Creates Bronze/Silver/Gold layers with DLT. Uses KB + MCP validation.
-- **`lakeflow-expert`** — Databricks Lakeflow (DLT) SME for pipeline development, CDC, data quality, and production deployment. Uses KB + MCP validation.
-- **`lakeflow-pipeline-builder`** — Builds Databricks Lakeflow (DLT) pipelines for Medallion Architecture. Uses KB + MCP validation for production-ready pipelines.
-- **`lakeflow-specialist`** — Databricks Lakeflow (DLT) specialist for declarative pipelines, materialized views, streaming tables, and expectations.
+- **`lakeflow-architect`** — Databricks Lakeflow expert for building Medallion architecture pipelines. Creates Bronze/Silver/Gold layers with Lakeflow Spark Declarative Pipelines (formerly DLT) and designs their orchestration with Lakeflow Jobs. Uses KB + MCP validation.
+- **`lakeflow-expert`** — Databricks Lakeflow pipelines SME (Lakeflow Spark Declarative Pipelines, formerly DLT) for pipeline development, CDC, data quality, and production deployment with Lakeflow Jobs. Uses KB + MCP validation.
+- **`lakeflow-pipeline-builder`** — Builds Databricks Lakeflow pipelines (Lakeflow Spark Declarative Pipelines, formerly DLT) for Medallion Architecture, plus the Lakeflow Jobs and DABs configuration that schedule and deploy them. Uses KB + MCP validation for production-ready pipelines.
+- **`lakeflow-specialist`** — Databricks Lakeflow pipelines specialist (Lakeflow Spark Declarative Pipelines, formerly DLT) for declarative pipelines, materialized views, streaming tables, flows, sinks, and expectations.
 - **`lakehouse-architect`** — Open table format and catalog specialist for Iceberg, Delta Lake, and lakehouse governance.
 - **`lambda-builder`** — AWS Lambda expert for Python serverless file processing. Builds S3-triggered Lambda functions with proper error handling, structured logging, and Parquet output. Uses KB + MCP validation for production-ready code.
 - **`llm-specialist`** — Prompt engineering specialist and LLM expert. Masters structured prompting, chain-of-thought reasoning, and AI-powered extraction. Uses KB + MCP validation for optimized, production-ready prompts.

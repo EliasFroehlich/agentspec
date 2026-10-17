@@ -2,28 +2,30 @@
 
 > **Purpose**: field_validator, model_validator decorators and validation modes in Pydantic v2
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
 Pydantic v2 provides two decorator-based validators: `@field_validator` for single-field
 validation and `@model_validator` for cross-field logic. Each supports `mode="before"` (raw
 input), `mode="after"` (validated data), and `mode="wrap"` (control flow). Validators raise
-`ValueError` or `AssertionError` to reject data and return the value to accept it.
+`ValueError` or `AssertionError` to reject data and return the value to accept it. Prefer
+`ValueError`: `assert` statements are skipped when Python runs with `-O`.
 
 ## The Pattern
 
 ```python
-from pydantic import BaseModel, field_validator, model_validator, Field
-from typing import Optional
 from datetime import date
+from typing import Any, Self
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class InvoiceExtraction(BaseModel):
     invoice_number: str
     vendor_name: str
     issue_date: date
-    due_date: Optional[date] = None
+    due_date: date | None = None
     subtotal: float = Field(gt=0)
     tax: float = Field(ge=0)
     total: float = Field(gt=0)
@@ -38,13 +40,13 @@ class InvoiceExtraction(BaseModel):
 
     @field_validator("vendor_name", mode="before")
     @classmethod
-    def coerce_vendor_name(cls, v) -> str:
+    def coerce_vendor_name(cls, v: Any) -> str:
         if isinstance(v, list):
             return " ".join(str(item) for item in v)
         return str(v).strip()
 
     @model_validator(mode="after")
-    def check_dates_and_totals(self) -> "InvoiceExtraction":
+    def check_dates_and_totals(self) -> Self:   # after-validators are instance methods returning self
         if self.due_date and self.due_date < self.issue_date:
             raise ValueError("due_date cannot be before issue_date")
         expected_total = round(self.subtotal + self.tax, 2)
@@ -136,3 +138,7 @@ class Document(BaseModel):
 - [BaseModel](../concepts/base-model.md)
 - [Custom Validators](../patterns/custom-validators.md)
 - [Error Handling](../patterns/error-handling.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/concepts/validators/

@@ -1,148 +1,128 @@
-schema_version: "1.0"
+schema_version: "1.1"
 domain: prompt-engineering
 file_type: prompt-format-specification
-last_validated: "2026-03-26"
-source: "MCP validated: Exa WebSearch, Anthropic Docs, OpenAI Docs"
+last_validated: "2026-10-17"
+source: "platform.claude.com (prompting best practices, structured outputs, effort), platform.openai.com (structured outputs, models), github.com/googleapis/python-genai, ai.google.dev/gemini-api/docs/deprecations, docs.databricks.com (AI Functions); model IDs as of 2026-10-17"
 
 # Prompt Format Specification
-# Defines the canonical structure for prompts in this knowledge base
+# Canonical structure for prompts in this knowledge base.
 
 prompt_structure:
-  description: "Standard prompt anatomy for extraction and structured output tasks"
+  description: "Prompt anatomy for extraction and structured-output tasks"
   sections:
     system_prompt:
       position: 1
       required: true
       type: string
-      description: "Role, persona, and behavioral constraints"
-      max_length_tokens: 500
+      description: "Role, scope, and constraints; stable across requests so it can be cached"
       fields:
         role:
           type: string
           required: true
-          description: "Expert domain and persona"
           validation:
-            - "Must be specific (not 'helpful assistant')"
-            - "Should name the domain expertise"
+            - "Names the task and audience (not 'helpful assistant')"
         constraints:
           type: list
           required: true
-          description: "Behavioral guardrails and limitations"
           validation:
-            - "Must include at least one negative constraint (NEVER)"
-            - "Must include output format rule"
-        quality_rules:
-          type: list
-          required: false
-          description: "Standards for output quality"
-
-    task_definition:
+            - "Each real business/policy constraint states its reason"
+            - "No timestamps, user IDs or per-request flags (they break prompt caching)"
+            - "Emphasis (MUST/NEVER) only for an instruction shown to be ignored"
+    long_context:
       position: 2
-      required: true
+      required: false
       type: string
-      description: "Clear statement of what the LLM should do"
-      max_length_tokens: 200
-      validation:
-        - "Must be actionable (starts with verb)"
-        - "Must be specific to a single task"
-
-    schema_or_format:
+      description: "Documents and data, wrapped in XML tags (<document>, <source>), placed before instructions"
+    task_definition:
       position: 3
       required: true
-      type: object
-      description: "Expected output structure"
-      formats:
-        json_schema:
-          description: "Pydantic model JSON schema"
-          validation:
-            - "All fields must have type annotations"
-            - "Required vs optional must be explicit"
-        field_list:
-          description: "Named fields with descriptions"
-          validation:
-            - "Each field must have a type and description"
-
-    rules:
+      type: string
+      description: "What to do with the context; outcome-focused rather than a prescribed step list"
+    output_contract:
       position: 4
       required: true
-      type: list
-      description: "Extraction and formatting rules"
-      validation:
-        - "Must include null handling rule"
-        - "Must include date format rule if dates are expected"
-        - "Must include numeric format rule if amounts are expected"
-
+      type: object
+      description: "Prefer an API-enforced schema; prose describes only what the schema cannot express"
+      formats:
+        api_schema:
+          description: "Pydantic model passed to messages.parse / responses.parse / response_schema"
+          validation:
+            - "Every object has explicit properties; no dict/map fields"
+            - "Optional fields for values that may be absent (null policy)"
+        prose_format:
+          description: "Free-text structure (headings, length) when no schema applies"
     examples:
       position: 5
       required: false
       type: list
-      description: "Few-shot examples for format demonstration"
+      description: "3-5 varied examples in <example> tags inside <examples>"
       validation:
-        - "All examples must use the same output format"
-        - "Include at least one edge case example"
-        - "Minimum 1, maximum 5 examples"
-
-    input_section:
+        - "Same output format across examples"
+        - "At least one edge case"
+        - "Do not restate the API schema as text"
+    query:
       position: 6
       required: true
       type: string
-      description: "Placeholder for the actual input data"
-      validation:
-        - "Must use a clear delimiter (## Document, ## Input, etc.)"
-        - "Must be the last section before output instruction"
+      description: "The per-request question or input, last in the user turn"
 
-    output_instruction:
-      position: 7
-      required: true
-      type: string
-      description: "Explicit instruction for response format"
-      validation:
-        - "Must say 'Return ONLY' or equivalent"
-        - "Must reference the schema defined above"
+# Reasoning and sampling controls by provider (replaces the old temperature guide)
+reasoning_controls:
+  anthropic_current_models:
+    models: ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    thinking: "adaptive (always on for Fable 5.1 and Opus 5.5)"
+    effort: ["low", "medium", "high", "xhigh", "max"]
+    effort_default: {claude-opus-5-5: "medium", claude-haiku-5-5: "medium", claude-sonnet-5-5: "high"}
+    sampling_params: "Not supported: temperature/top_p/top_k return 400 (non-default values on Sonnet 5.5 / Haiku 5.5)"
+    prefill: "Not supported (400)"
+  openai_gpt6:
+    reasoning: "reasoning={'effort': ...} on the Responses API"
+    sampling_params: "temperature is a documented Responses API parameter; check per-model support"
+  gemini:
+    sampling_params: "temperature/top_p/top_k in GenerateContentConfig"
+  guidance_by_task:
+    extraction: {anthropic_effort: "low-medium", note: "schema + null policy matter more than reasoning depth"}
+    classification: {anthropic_effort: "low", note: "enum-valued schema"}
+    summarization: {anthropic_effort: "medium"}
+    analysis_and_code: {anthropic_effort: "high-xhigh"}
 
-# Temperature Settings
-temperature_guide:
-  extraction: 0.0
-  classification: 0.0
-  summarization: 0.3
-  creative: 0.7
-  code_generation: 0.0
-  brainstorming: 0.9
-
-# Model Recommendations
+# Model Recommendations (as of 2026-10-17)
 model_recommendations:
   extraction:
-    primary: "claude-sonnet-4-6"
-    alternatives: ["gpt-4o", "gemini-2.5-pro"]
-    notes: "Use tool-use-as-schema (Claude) or JSON Schema mode (OpenAI)"
+    primary: "claude-sonnet-5-5"
+    alternatives: ["gpt-6.1-sol", "gemini-3.8-flash"]
+    notes: "Native structured outputs on each provider; Databricks ai_extract for batch SQL"
   classification:
-    primary: "gpt-4o-mini"
-    alternatives: ["claude-haiku-3-5", "gemini-2.0-flash"]
-    notes: "Cheaper models sufficient for classification"
+    primary: "claude-haiku-5-5"
+    alternatives: ["gpt-6-luna", "gemini-3.5-flash-lite"]
+    notes: "Smaller models are usually sufficient; enforce labels with an enum schema"
   summarization:
-    primary: "claude-sonnet-4-6"
-    alternatives: ["gpt-4o", "gemini-2.5-pro"]
-    notes: "Balance quality and cost"
+    primary: "claude-sonnet-5-5"
+    alternatives: ["gpt-6.1-sol", "gemini-3.8-flash"]
   structured_output:
-    primary: "gpt-4o"
-    alternatives: ["claude-sonnet-4-6"]
-    notes: "OpenAI JSON Schema mode (strict) or Instructor library"
-    library: "instructor"
+    primary: "claude-sonnet-5-5 via messages.parse"
+    alternatives: ["gpt-6.1-sol via responses.parse", "any provider via Instructor"]
+  hard_reasoning:
+    primary: "claude-opus-5-5"
+    alternatives: ["claude-fable-5-1", "gpt-6-astra", "gemini-4-argon"]
+  retired_do_not_use: ["claude-3-5-haiku-20241022", "claude-3-7-sonnet-20250219", "gemini-2.0-flash (shut down 2026-06-01)", "gpt-4.5-preview"]
+  not_for_new_projects: ["gemini-2.5-* (served only to prior users; Google recommends 3.5 Flash-Lite or 3.8 Flash)"]
+  deprecated: ["gpt-4o (removal 2027-01-14)", "gpt-4o-mini (removal 2027-01-14)", "claude-sonnet-4-5 (retires 2026-11-30)"]
 
 # Validation Checklist
 validation_checklist:
   structure:
-    - "System prompt defines role and constraints"
-    - "Task is explicit and actionable"
-    - "Output format is specified with schema"
-    - "Rules cover edge cases (null, dates, amounts)"
-  quality:
-    - "Temperature matches task type"
-    - "JSON mode enabled for structured output"
-    - "Pydantic validation on response"
-    - "Retry logic for validation failures"
+    - "System prompt defines role, scope and reasoned constraints"
+    - "Long context first, task and question last"
+    - "Output enforced by an API schema when structured"
+    - "Null policy, date and number formats stated"
+  request:
+    - "No temperature/top_p/top_k/prefill/budget_tokens on current Claude models"
+    - "No forced tool_choice on Fable 5.1 / Opus 5.5 / Sonnet 5.5"
+    - "max_tokens leaves room for thinking"
+    - "Response blocks read by type; stop_reason checked (refusal, max_tokens)"
   production:
-    - "Prompt is version-controlled"
-    - "Test cases cover edge cases"
-    - "Token usage is monitored"
-    - "Error handling is implemented"
+    - "Prompt is versioned (Git or MLflow Prompt Registry)"
+    - "Evaluation dataset covers edge cases"
+    - "Token usage and cost are monitored"
+    - "Errors and refusals are handled explicitly"

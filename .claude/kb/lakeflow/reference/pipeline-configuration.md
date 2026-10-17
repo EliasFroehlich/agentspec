@@ -1,352 +1,151 @@
 # Pipeline Configuration
 
-> Source: https://docs.databricks.com/aws/en/dlt/configure-pipeline
+> **Purpose**: Pipeline settings (JSON/YAML spec), editions, compute, run-as identity, modes, channels, source code, dependencies, notifications and properties
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Default Configuration
+---
 
-When creating a new pipeline, Databricks sets:
-- ✅ Unity Catalog enabled
-- ✅ Current runtime channel
-- ✅ Serverless compute
-- ✅ Development mode: OFF
+## 1. Defaults for a new pipeline
 
-## Compute Configuration
+Created from New > ETL pipeline (or a workspace/Git folder, or as a bundle project): Unity Catalog,
+`current` channel, serverless compute, default publishing mode, source code in a `transformations`
+folder. Pipelines created before 2025-02-05 may use the legacy publishing mode and `LIVE` schema.
 
-### Recommended: Enhanced Autoscaling
+## 2. Settings reference
 
-Automatically scales compute resources based on workload.
+| Key | Type | Notes |
+|-----|------|-------|
+| `name` | string | Display name |
+| `catalog` | string | Default catalog; setting it enables Unity Catalog |
+| `schema` | string | Default schema (replaces legacy `target`) |
+| `target` | string | Legacy; use `schema` |
+| `storage` | string | Legacy Hive metastore storage location |
+| `serverless` | bool | Serverless compute (needs `ADVANCED`) |
+| `clusters` | array | Classic compute only; mutually exclusive with serverless |
+| `photon` | bool | Classic only, default `false`; ignored with serverless |
+| `edition` | `CORE` / `PRO` / `ADVANCED` | Default `ADVANCED` |
+| `channel` | `current` / `preview` | Default `current` |
+| `continuous` | bool | Default `false` (triggered) |
+| `development` | bool | Default `false`; bundles set it through `mode` |
+| `libraries` | array | `glob` (`include` path or folder `/**`), `file`, `notebook`; `whl` deprecated; JARs unsupported in UC |
+| `root_path` | string | Root folder; added to `sys.path` for Python imports |
+| `environment` | object | `dependencies` (pip lines), `environment_version` (Public Preview) |
+| `configuration` | map | Spark conf + values for `spark.conf.get()` / `${key}` |
+| `parameters` | map | Beta; SQL named parameters (`:key`) |
+| `notifications` | array | `email_recipients` + `alerts`: `on-update-success`, `on-update-failure`, `on-update-fatal-failure`, `on-flow-failure` |
+| `event_log` | object | `{catalog, schema, name}` to publish the event log |
+| `run_as` | object | `user_name`, `service_principal_name` or `group_name` |
+| `tags` | map | Up to 25; not billing tags |
+| `budget_policy_id`, `usage_policy_id` | string | Serverless cost attribution |
+| `restart_window` | object | Window in which the pipeline may be restarted |
 
-### Configurable Settings
+## 3. Editions
 
-| Setting | Description |
-|---------|-------------|
-| **Cluster Policy** | Apply organizational policies |
-| **Cluster Mode** | Fixed size or Legacy autoscaling |
-| **Min/Max Workers** | Autoscaling boundaries |
-| **Photon Acceleration** | Enable for better performance |
-| **Instance Profile** | IAM role for AWS resources |
-| **Cluster Tags** | For cost tracking and organization |
-| **Instance Types** | Worker and driver node types |
+| Edition | Includes |
+|---------|----------|
+| `CORE` | Streaming ingest |
+| `PRO` | Core + CDC (`AUTO CDC`) |
+| `ADVANCED` | Pro + expectations; required for serverless |
 
-### Serverless vs Classic Compute
+Using a feature outside the edition (for example expectations on `CORE`) fails with an explanatory
+error.
 
-| Feature | Serverless | Classic |
-|---------|-----------|---------|
-| **Setup** | Zero configuration | Manual cluster config |
-| **Scaling** | Automatic vertical/horizontal | Manual configuration |
-| **Startup** | 4-6 minutes | Variable |
-| **Management** | Fully managed | Self-managed |
-| **Cost** | Pay per use | Pay for cluster time |
+## 4. Compute
 
-## Product Editions
+- Serverless (recommended): no compute options to tune. See [serverless-pipelines.md](serverless-pipelines.md).
+- Classic: Databricks recommends Enhanced autoscaling; options include cluster policy, fixed size or
+  legacy autoscaling, min/max workers, Photon toggle, instance profile, cluster tags,
+  worker/driver types. Cluster attributes set by the system cannot be overridden: `cluster_name`,
+  `data_security_mode`/`access_mode`, `spark_version`, `autotermination_minutes`, `runtime_engine`.
+- UC pipelines run on standard access mode compute.
 
-### Core
-- Basic streaming ingest
-- Simple transformations
+## 5. Run-as identity
 
-### Pro
-- Streaming workloads
-- CDC capabilities
-- Advanced transformations
+Run-as changes who the pipeline runs as and who owns its published tables. Service principals are
+the documented best practice; an account group assigned to the workspace is also allowed (Sep 2026),
+but not workspace-local groups, `admins`, `users` or `account users`.
 
-### Advanced
-- All Pro features
-- Data quality expectations
-- Advanced monitoring
-- SLA guarantees
+| Who | Needs |
+|-----|-------|
+| User making the change | `CAN_MANAGE` on the pipeline; `CAN_USE` on the service principal, or membership/Assume on the group |
+| Run-as identity | Workspace access, cluster policy use and compute creation (classic), read on source files, `USE CATALOG`, `USE SCHEMA` + `CREATE TABLE` (and `CREATE MATERIALIZED VIEW`), `MODIFY` on existing tables, `CREATE SCHEMA` if it creates schemas |
 
-## Run-As User Configuration
+Bundles: `run_as: { service_principal_name: ... }` or `run_as: { group_name: ... }` on the pipeline.
 
-**Purpose**: Change pipeline identity for continuity
+## 6. Pipeline mode
 
-### Recommended: Use Service Principals
+| Mode | Behavior | Use |
+|------|----------|-----|
+| Triggered (default) | Refreshes with data available at start, then stops | Scheduled batch; most workloads |
+| Continuous | Keeps processing as data arrives; compute always on | Only with a proven low-latency requirement |
 
-Benefits:
-- Independent of individual users
-- Organizational continuity
-- Consistent permissions
+For production continuous processing Databricks recommends a continuous **job** wrapping a
+triggered pipeline; the job's schedule decides the execution mode. Changing settings applies to the
+next update; continuous pipelines restart automatically (can interrupt an active update).
 
-### Required Permissions
+## 7. Source code
 
-**Workspace:**
-- CAN USE permission
+- Workspace files (`.py`, `.sql`) in the pipeline root folder, by default under `transformations/`.
+  Notebooks from the legacy notebook editing experience are still supported (`libraries.notebook`).
+- Python modules shared across files: put them under the root folder (for example `utilities/`) or
+  a Git folder and import them.
+- Python dependencies: `environment.dependencies` instead of `%pip install`.
 
-**Source Code:**
-- READ permission on notebooks/files
+## 8. Parameters and configuration
 
-**Catalog:**
-- USE CATALOG
-- USE SCHEMA
-- CREATE TABLE
-- MODIFY (for existing tables)
-
-## Source Code Configuration
-
-### Supported Languages
-
-```python
-# Python
-import dlt
-
-@dlt.table()
-def my_table():
-    return spark.read.table("source")
-```
-
-```sql
--- SQL
-CREATE OR REFRESH STREAMING TABLE my_table
-AS SELECT * FROM source
-```
-
-### External Dependencies
-
-**Python Libraries:**
 ```json
 {
-  "libraries": [
-    {"pypi": {"package": "pandas==1.5.3"}},
-    {"pypi": {"package": "requests"}}
-  ]
+  "configuration": { "landing_path": "/Volumes/main/landing/files", "pipelines.trigger.interval": "1 hour" },
+  "parameters": { "start_date": "2026-01-01" }
 }
 ```
 
-**JAR Files:**
-```json
-{
-  "libraries": [
-    {"jar": "s3://bucket/libs/custom-lib.jar"}
-  ]
-}
-```
+Python reads `spark.conf.get("landing_path")`; SQL reads `${landing_path}` or `:start_date`. Details:
+[parameters.md](parameters.md).
 
-### Import Modules
+## 9. Notable properties
 
-```python
-# From workspace
-from my_package import helper_functions
+| Property | Default | Meaning |
+|----------|---------|---------|
+| `pipelines.trigger.interval` | 5 s streaming; 1 min complete (Delta sources); 10 min complete (non-Delta) | Set per table where possible |
+| `pipelines.maxFlowRetryAttempts` | 2 retries | Retries of a single flow on retryable errors |
+| `pipelines.numUpdateRetryAttempts` | 5 triggered / unlimited continuous | Retries of the whole update |
+| `pipelines.reset.allowed` (table) | `true` | Allow full refresh of the table |
+| `pipelines.autoOptimize.managed` (table) | `true` | Scheduled optimization (not used under predictive optimization) |
+| `pipelines.autoOptimize.zOrderCols` (table) | none | Prefer liquid clustering |
+| `pipelines.externalMetadata.enabled` | - | External data access for MVs/STs (DBR 17.3+) |
+| `pipelines.dropInactiveTables` | - | `true` removes inactive tables from UC on the next update |
 
-# From Git repositories
-from git_repo.utils import transformations
-```
-
-## Pipeline Modes
-
-### Continuous Mode
-- Pipeline runs continuously
-- Processes data as it arrives
-- Higher compute costs
-- Lower latency
-
-**Use cases:**
-- Real-time dashboards
-- Time-sensitive applications
-- Streaming analytics
-
-### Triggered Mode
-- Pipeline runs on schedule or manual trigger
-- Processes batch data
-- Lower compute costs
-- Higher latency
-
-**Use cases:**
-- Daily batch processing
-- Cost optimization
-- Non-time-sensitive workloads
-
-## Configuration Parameters
-
-### Define Parameters
-
-**UI Configuration:**
-```json
-{
-  "catalog_name": "production",
-  "schema_name": "sales",
-  "source_path": "s3://bucket/data/"
-}
-```
-
-### Use Parameters in Code
-
-**Python:**
-```python
-catalog = spark.conf.get("catalog_name")
-schema = spark.conf.get("schema_name")
-
-@dlt.table()
-def sales():
-    return spark.read.table(f"{catalog}.{schema}.raw_sales")
-```
-
-**SQL:**
-```sql
-SET catalog_name = production;
-SET schema_name = sales;
-
-CREATE OR REFRESH STREAMING TABLE ${catalog_name}.${schema_name}.sales
-AS SELECT * FROM source
-```
-
-## Notifications
-
-### Email Notifications
-
-Configure alerts for:
-- ✉️ Pipeline failures
-- ✉️ Pipeline success
-- ✉️ Data quality violations
-- ✉️ Long-running updates
-
-### Webhook Notifications
-
-Integrate with:
-- Slack
-- PagerDuty
-- Custom systems
-
-## Runtime Channel
-
-### Current Channel (Recommended)
-- Latest stable features
-- Regular updates
-- Best performance
-
-### Preview Channel
-- Experimental features
-- Early access
-- May have bugs
-
-### Legacy Channels
-- Specific runtime versions
-- For compatibility
-- Not recommended for new pipelines
-
-## Advanced Configuration
-
-### Development Mode
-
-**Enabled:**
-- ⚡ Faster iterations
-- 🔄 Reuses cluster
-- 📊 Reduced costs
-- ⚠️ Not for production
-
-**Disabled (Production):**
-- ✅ Full refresh capability
-- ✅ Optimized performance
-- ✅ Complete lineage tracking
-
-### Target Schema
-
-Specify where pipeline tables are created:
+## 10. Example (classic compute, when serverless is not an option)
 
 ```json
 {
-  "target": "main.my_schema"
-}
-```
-
-### Storage Location
-
-Custom storage path for Delta tables:
-
-```json
-{
-  "storage": "s3://bucket/pipelines/my-pipeline/"
-}
-```
-
-## Complete Configuration Example
-
-```json
-{
-  "name": "production_sales_pipeline",
-  "target": "production.sales",
-  "storage": "s3://data-lake/pipelines/sales/",
-  "configuration": {
-    "catalog_name": "production",
-    "schema_name": "sales",
-    "source_path": "s3://raw-data/sales/",
-    "lookback_days": "7"
-  },
-  "libraries": [
-    {"notebook": {"path": "/Pipelines/sales_transformations"}},
-    {"pypi": {"package": "great-expectations"}}
-  ],
-  "clusters": [
-    {
-      "label": "default",
-      "num_workers": 2,
-      "autoscale": {
-        "min_workers": 1,
-        "max_workers": 5,
-        "mode": "ENHANCED"
-      },
-      "node_type_id": "i3.xlarge",
-      "driver_node_type_id": "i3.xlarge",
-      "spark_conf": {
-        "spark.sql.shuffle.partitions": "auto"
-      },
-      "aws_attributes": {
-        "instance_profile_arn": "arn:aws:iam::123456789:instance-profile/DatabricksRole"
-      }
-    }
-  ],
-  "continuous": false,
-  "development": false,
-  "photon": true,
-  "channel": "CURRENT",
+  "name": "sales_pipeline_classic",
+  "catalog": "main",
+  "schema": "sales",
   "edition": "ADVANCED",
-  "notifications": [
-    {
-      "email_recipients": ["data-team@company.com"],
-      "alerts": ["on-update-failure", "on-update-success"]
-    }
-  ]
+  "channel": "CURRENT",
+  "photon": true,
+  "clusters": [
+    { "label": "default",
+      "autoscale": { "min_workers": 1, "max_workers": 5, "mode": "ENHANCED" },
+      "node_type_id": "<node-type-id>" }
+  ],
+  "libraries": [{ "glob": { "include": "/Workspace/Users/<user>/sales_pipeline/transformations/**" } }],
+  "notifications": [{ "email_recipients": ["data-team@example.com"], "alerts": ["on-update-failure"] }]
 }
 ```
 
-## Best Practices
+## Sources
 
-### ✅ DO
-
-1. **Use serverless** for new pipelines
-2. **Enable Photon** for better performance
-3. **Configure service principals** for run-as identity
-4. **Set up notifications** for failures
-5. **Use parameters** for environment-specific configs
-6. **Enable development mode** during development
-7. **Tag clusters** for cost tracking
-
-### ❌ DON'T
-
-1. **Don't use development mode** in production
-2. **Don't hardcode** environment-specific values
-3. **Don't skip** notification setup
-4. **Don't over-provision** compute resources
-5. **Don't ignore** runtime channel updates
-
-## Troubleshooting
-
-### Pipeline Won't Start
-- Check run-as user permissions
-- Verify source code access
-- Confirm compute configuration
-
-### Slow Performance
-- Enable Photon acceleration
-- Increase worker count
-- Use appropriate instance types
-- Check for data skew
-
-### High Costs
-- Use triggered mode vs continuous
-- Enable autoscaling
-- Optimize worker configuration
-- Consider serverless
-
-### Permission Errors
-- Verify Unity Catalog permissions
-- Check run-as user grants
-- Confirm instance profile IAM roles
+- https://docs.databricks.com/aws/en/ldp/configure-pipeline
+- https://docs.databricks.com/aws/en/ldp/properties
+- https://docs.databricks.com/aws/en/ldp/serverless
+- https://docs.databricks.com/aws/en/ldp/parameters
+- https://docs.databricks.com/aws/en/ldp/unity-catalog
+- https://docs.databricks.com/aws/en/ldp/multi-file-editor
+- https://docs.databricks.com/aws/en/ldp/limitations
+- https://docs.databricks.com/aws/en/external-access/external-for-pipelines
+- https://docs.databricks.com/aws/en/dev-tools/bundles/resources
+- https://docs.databricks.com/aws/en/release-notes/dlt/2026

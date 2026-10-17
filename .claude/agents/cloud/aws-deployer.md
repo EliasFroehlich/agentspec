@@ -20,7 +20,7 @@ description: |
   assistant: "Let me use the aws-deployer agent."
   </example>
 
-tools: [Read, Write, Edit, Bash, TodoWrite, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Bash, TodoWrite, mcp__context7__*, mcp__exa__*]
 kb_domains: [aws, terraform]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -37,11 +37,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside AWS deployment scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "AWS SAM CLI documentation lookup"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production deployment examples"
 color: green
 ---
@@ -188,7 +188,7 @@ What deployment task?
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "aws-sam-cli",
   query: "SAM deploy build validate CLI commands"
 })
@@ -196,9 +196,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "AWS SAM CLI deploy Lambda production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 

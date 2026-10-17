@@ -64,6 +64,12 @@ UNPIVOT quarterly_report
 ON q1_rev, q2_rev, q3_rev, q4_rev
 INTO NAME month VALUE revenue;
 
+-- Spark SQL 3.4+ / Databricks (NULLs excluded by default; INCLUDE NULLS to keep them)
+SELECT product, quarter, revenue
+FROM quarterly_report
+UNPIVOT INCLUDE NULLS (revenue FOR quarter IN (q1_rev AS Q1, q2_rev AS Q2, q3_rev AS Q3, q4_rev AS Q4));
+-- PySpark 3.4+: df.unpivot(["product"], ["q1_rev", "q2_rev"], "quarter", "revenue")  (alias: melt)
+
 -- Manual unpivot (any dialect — UNION ALL)
 SELECT product, 'Q1' AS quarter, q1_rev AS revenue FROM quarterly_report
 UNION ALL
@@ -81,8 +87,8 @@ SELECT product, 'Q4', q4_rev FROM quarterly_report;
 | Snowflake | Native | Native | Via stored procedure |
 | BigQuery | Native | Native | Via EXECUTE IMMEDIATE |
 | DuckDB | Native (PIVOT ON) | Native (UNPIVOT ON) | Via prepared statement |
-| Spark SQL | Native | Manual UNION ALL | Via DataFrame API |
-| PostgreSQL | `crosstab()` extension | UNNEST | Via `crosstab()` |
+| Spark SQL / Databricks | Native | Native (Spark 3.4+) | Via DataFrame API (`groupBy().pivot()`) |
+| PostgreSQL | `crosstab()` (`tablefunc` extension) | No clause — `UNNEST` / UNION ALL | Via `crosstab()` |
 
 ## Example Usage
 

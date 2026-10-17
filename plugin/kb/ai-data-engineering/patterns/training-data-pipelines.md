@@ -49,11 +49,14 @@ stages:
           cache: false
 """
 
-# --- 2. Label Studio Integration ---
-from label_studio_sdk import Client
+# --- 2. Label Studio Integration (label-studio-sdk 2.x; `Client` is the deprecated <1.0 API) ---
+import os
+import requests
+from label_studio_sdk import LabelStudio
 
-ls_client = Client(url="http://localhost:8080", api_key="your-api-key")
-project = ls_client.create_project(
+LS_URL = "http://localhost:8080"
+client = LabelStudio(base_url=LS_URL, api_key=os.environ["LABEL_STUDIO_API_KEY"])
+project = client.projects.create(
     title="NER Annotation - v2",
     label_config="""
     <View>
@@ -67,10 +70,12 @@ project = ls_client.create_project(
     """,
 )
 # Import tasks from dataset
-project.import_tasks([{"text": row["content"]} for row in unlabeled_data])
+client.projects.import_tasks(id=project.id, request=[{"text": row["content"]} for row in unlabeled_data])
 
-# Export completed annotations
-annotations = project.export_tasks(export_type="JSON")
+# Export completed annotations (open-source REST export; Enterprise uses the async exports API)
+resp = requests.get(f"{LS_URL}/api/projects/{project.id}/export", params={"exportType": "JSON"},
+                    headers={"Authorization": f"Token {os.environ['LABEL_STUDIO_API_KEY']}"}, timeout=60)
+annotations = resp.json()
 
 # --- 3. Dataset Splits with Stratification ---
 from sklearn.model_selection import train_test_split
@@ -131,18 +136,22 @@ print(f"Bias report: {bias_report}")
 
 # --- 6. Reproducibility Manifest ---
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
+import nlpaug
+import sklearn
 
 manifest = {
     "dataset_version": "v2.1",
-    "created_at": datetime.utcnow().isoformat(),
+    "created_at": datetime.now(timezone.utc).isoformat(),
     "random_seed": 42,
     "split_ratio": {"train": 0.7, "val": 0.15, "test": 0.15},
     "total_samples": len(df),
     "label_distribution": df["label"].value_counts().to_dict(),
     "augmentation": {"method": "synonym_replacement", "n_aug": 2},
     "bias_check": bias_report,
-    "dependencies": {"pandas": pd.__version__, "sklearn": "1.4.0", "nlpaug": "1.1.11"},
+    "dependencies": {"pandas": pd.__version__, "sklearn": sklearn.__version__,
+                     "nlpaug": nlpaug.__version__},   # record installed versions, never hardcode them
 }
 
 with open("data/processed/manifest.json", "w") as f:
@@ -183,3 +192,9 @@ dvc metrics diff
 - [Feature Engineering](feature-engineering.md)
 - [LLMOps Patterns](../concepts/llmops-patterns.md)
 - [Embedding Pipelines](../concepts/embedding-pipelines.md)
+
+## Sources
+
+- https://github.com/humansignal/label-studio-sdk (README: SDK 1.x/2.x `LabelStudio` client; `Client` is the pre-1.0 API)
+- https://pypi.org/project/label-studio-sdk/ ; https://pypi.org/project/dvc/ ; https://pypi.org/project/scikit-learn/
+- https://docs.python.org/3/library/datetime.html (`datetime.utcnow()` is deprecated)

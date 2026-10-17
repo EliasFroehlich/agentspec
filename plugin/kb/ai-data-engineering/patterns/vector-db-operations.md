@@ -1,175 +1,151 @@
 # Vector DB Operations
 
-> **Purpose**: Vector database operations across pgvector, Qdrant, Milvus, and hybrid search with index tuning
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Production operations on pgvector 0.8, Qdrant 1.19 and Databricks AI Search — indexes, filtered search, native hybrid search, and quantization
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Storing and querying high-dimensional embeddings at scale
-- Need ACID guarantees alongside vector search (pgvector)
-- Building filtered vector search with complex metadata predicates
-- Combining semantic search with keyword search (hybrid)
-- Tuning recall/latency tradeoffs for production workloads
-- Multi-tenant vector isolation (Qdrant, Milvus)
+- Storing and querying embeddings with metadata filters at production scale
+- ACID guarantees alongside vectors (pgvector), rich payload filtering and quantization (Qdrant), or managed sync from
+  lakehouse tables (Databricks AI Search)
+- Hybrid search: combine keyword matching (exact terms, IDs) with semantic similarity
 
 ## Implementation
 
 ```sql
--- =============================================
--- pgvector: PostgreSQL Vector Extension
--- =============================================
-
--- Enable the extension
+-- pgvector 0.8.7 (Postgres 13+). vector up to 2,000 dims, halfvec up to 4,000, bit up to 64,000.
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Create table with vector column (1536 = OpenAI text-embedding-3-small)
 CREATE TABLE documents (
-    id          BIGSERIAL PRIMARY KEY,
-    content     TEXT NOT NULL,
-    metadata    JSONB DEFAULT '{}',
-    embedding   vector(1536),
-    created_at  TIMESTAMPTZ DEFAULT NOW()
+    id         BIGSERIAL PRIMARY KEY,
+    content    TEXT NOT NULL,
+    metadata   JSONB DEFAULT '{}',
+    embedding  vector(1536),
+    textsearch tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
 );
 
--- HNSW index for fast approximate nearest neighbor search
--- m=16: connections per layer, ef_construction=200: build-time search width
-CREATE INDEX idx_documents_embedding ON documents
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 200);
+-- HNSW index (cosine). m = connections per layer, ef_construction = build-time candidate list
+CREATE INDEX ON documents USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 200);
+CREATE INDEX ON documents USING gin (textsearch);
 
--- Cosine distance query (<=>) -- returns most similar documents
-SELECT id, content, metadata,
-       1 - (embedding <=> $1::vector) AS similarity
+-- Filtered ANN: iterative index scans (0.8.0+) keep scanning until enough rows pass the filter
+SET hnsw.ef_search = 100;
+SET hnsw.iterative_scan = relaxed_order;          -- or strict_order
+SELECT id, content, 1 - (embedding <=> $1::vector) AS similarity
 FROM documents
 WHERE metadata->>'department' = 'engineering'
 ORDER BY embedding <=> $1::vector
 LIMIT 10;
 
--- Set search-time precision (higher = better recall, slower)
-SET hnsw.ef_search = 100;
+-- Hybrid: Postgres full-text search for the keyword side; fuse with RRF (or a cross-encoder) in the app
+SELECT id, ts_rank_cd(textsearch, query) AS rank
+FROM documents, plainto_tsquery('english', 'executor FetchFailed') query
+WHERE textsearch @@ query ORDER BY rank DESC LIMIT 20;
+
+-- Smaller working set: half-precision index over the same column, or binary quantization + re-rank
+CREATE INDEX ON documents USING hnsw ((embedding::halfvec(1536)) halfvec_cosine_ops);
 ```
 
 ```python
-"""Qdrant: Managed vector database with rich filtering."""
+"""Qdrant 1.19 (qdrant-client 1.19.1): Query API, payload indexes, native hybrid, TurboQuant."""
+from qdrant_client import QdrantClient, models
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance, VectorParams, PointStruct,
-    Filter, FieldCondition, MatchValue, Range,
-)
+client = QdrantClient(url="http://localhost:6333")   # Cloud: url=..., api_key=os.environ["QDRANT_API_KEY"]
 
-client = QdrantClient(url="http://localhost:6333")
-
-# Create collection with HNSW configuration
 client.create_collection(
     collection_name="documents",
-    vectors_config=VectorParams(
-        size=1536,
-        distance=Distance.COSINE,
-        hnsw_config={"m": 16, "ef_construct": 200},
-    ),
+    vectors_config={"dense": models.VectorParams(size=1536, distance=models.Distance.COSINE)},
+    sparse_vectors_config={"sparse": models.SparseVectorParams()},
+    hnsw_config=models.HnswConfigDiff(m=16, ef_construct=200),
+    quantization_config=models.TurboQuantization(          # 4-bit default; available since v1.18.0
+        turbo=models.TurboQuantQuantizationConfig(memory=models.Memory.PINNED)),
 )
+client.create_payload_index("documents", field_name="department",
+                            field_schema=models.PayloadSchemaType.KEYWORD)
 
-# Upsert points with payload (metadata)
-client.upsert(
+client.upsert(collection_name="documents", points=[
+    models.PointStruct(id=1, vector={"dense": dense_vec,
+                                     "sparse": models.SparseVector(indices=sp_idx, values=sp_val)},
+                       payload={"department": "engineering", "year": 2026, "source": "wiki"}),
+])
+
+# Filtered dense search with the Query API (v1.10+; the interface the current docs use)
+hits = client.query_points(
+    collection_name="documents", query=query_dense, using="dense", limit=10,
+    query_filter=models.Filter(must=[
+        models.FieldCondition(key="department", match=models.MatchValue(value="engineering")),
+        models.FieldCondition(key="year", range=models.Range(gte=2025)),
+    ]),
+    with_payload=True,
+).points
+
+# Native hybrid: dense + sparse prefetch fused with Reciprocal Rank Fusion
+hybrid = client.query_points(
     collection_name="documents",
-    points=[
-        PointStruct(
-            id=1,
-            vector=embedding_vector,
-            payload={"department": "engineering", "year": 2026, "source": "wiki"},
-        ),
+    prefetch=[
+        models.Prefetch(query=models.SparseVector(indices=q_idx, values=q_val), using="sparse", limit=20),
+        models.Prefetch(query=query_dense, using="dense", limit=20),
     ],
-)
-
-# Filtered vector search
-results = client.search(
-    collection_name="documents",
-    query_vector=query_embedding,
-    query_filter=Filter(
-        must=[
-            FieldCondition(key="department", match=MatchValue(value="engineering")),
-            FieldCondition(key="year", range=Range(gte=2025)),
-        ]
-    ),
+    query=models.RrfQuery(rrf=models.Rrf()),          # or DBSF fusion
     limit=10,
-)
+).points
 ```
 
 ```python
-"""Hybrid Search: BM25 sparse + dense vectors with Reciprocal Rank Fusion."""
+"""Databricks AI Search: managed Delta Sync index, hybrid query."""
+from databricks.sdk import WorkspaceClient
 
-from rank_bm25 import BM25Okapi
-import numpy as np
-
-def hybrid_search(
-    query: str,
-    query_embedding: list[float],
-    corpus: list[dict],
-    vectorstore,
-    k: int = 10,
-    alpha: float = 0.5,
-) -> list[dict]:
-    """Combine BM25 keyword scores with dense vector similarity."""
-    # Sparse retrieval (BM25)
-    tokenized_corpus = [doc["content"].lower().split() for doc in corpus]
-    bm25 = BM25Okapi(tokenized_corpus)
-    bm25_scores = bm25.get_scores(query.lower().split())
-
-    # Dense retrieval (vector similarity)
-    dense_results = vectorstore.similarity_search_with_score(query, k=k * 2)
-
-    # Reciprocal Rank Fusion (RRF)
-    rrf_k = 60  # standard RRF constant
-    bm25_ranks = np.argsort(-bm25_scores)
-    dense_ids = [doc.metadata["id"] for doc, _ in dense_results]
-
-    fused_scores = {}
-    for rank, idx in enumerate(bm25_ranks[:k * 2]):
-        doc_id = corpus[idx]["id"]
-        fused_scores[doc_id] = fused_scores.get(doc_id, 0) + (1 - alpha) / (rrf_k + rank + 1)
-    for rank, doc_id in enumerate(dense_ids):
-        fused_scores[doc_id] = fused_scores.get(doc_id, 0) + alpha / (rrf_k + rank + 1)
-
-    # Sort by fused score and return top-k
-    ranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)[:k]
-    return [{"id": doc_id, "score": score} for doc_id, score in ranked]
+res = WorkspaceClient().vector_search_indexes.query_index(
+    index_name="main.docs.chunks_index", columns=["chunk_id", "chunk_to_retrieve"],
+    query_text="executor FetchFailed", query_type="HYBRID", num_results=10)
 ```
 
 ## Configuration
 
-| Engine | Index Type | Key Params | Tradeoff |
-|--------|-----------|------------|----------|
-| pgvector | HNSW | `m=16`, `ef_construction=200` | Higher m = better recall, more memory |
-| pgvector | IVF-Flat | `lists=100` | More lists = faster search, lower recall |
-| Qdrant | HNSW | `m=16`, `ef_construct=200` | Same as pgvector HNSW |
-| Any | -- | `ef_search=100` | Runtime: higher = better recall, slower |
+| Engine | Setting | Tradeoff |
+|--------|---------|----------|
+| pgvector HNSW | `m`, `ef_construction` | Higher = better recall, more memory and build time |
+| pgvector | `hnsw.ef_search` (runtime) | Higher = better recall, slower |
+| pgvector | `hnsw.iterative_scan` | `relaxed_order` returns more filtered rows; `strict_order` keeps exact distance order |
+| pgvector IVFFlat | `lists`, `ivfflat.probes` | More probes = better recall, slower |
+| Qdrant | `HnswConfigDiff(m, ef_construct)` | Same as HNSW above |
+| Qdrant | Quantization | 4-bit TurboQuant suggested over scalar int8 (except Manhattan distance); binary for high-dim centered vectors |
+| AI Search | Endpoint type, `query_type` | See [Databricks AI Search](../concepts/databricks-ai-search.md) |
 
-| Distance Metric | pgvector Op | Use Case |
-|----------------|-------------|----------|
-| Cosine | `<=>` | Normalized embeddings (most common) |
-| L2 (Euclidean) | `<->` | Absolute distance comparisons |
-| Inner Product | `<#>` | Pre-normalized vectors, dot product similarity |
+| Distance | pgvector operator | Qdrant |
+|----------|-------------------|--------|
+| Cosine | `<=>` | `Distance.COSINE` |
+| L2 | `<->` | `Distance.EUCLID` |
+| Inner product | `<#>` (negative inner product) | `Distance.DOT` |
 
 ## Example Usage
 
 ```python
-# pgvector with SQLAlchemy
+# pgvector with SQLAlchemy (the pgvector Python package, 0.5.1 on PyPI, adds ORM column types)
 from sqlalchemy import create_engine, text
 
-engine = create_engine("postgresql://user:pass@localhost/vectordb")
+engine = create_engine("postgresql+psycopg://app:***@localhost/vectordb")
 with engine.connect() as conn:
-    results = conn.execute(
-        text("SELECT id, content, 1 - (embedding <=> :q) AS sim "
-             "FROM documents ORDER BY embedding <=> :q LIMIT 5"),
+    rows = conn.execute(
+        text("SELECT id, content, 1 - (embedding <=> CAST(:q AS vector)) AS sim "
+             "FROM documents ORDER BY embedding <=> CAST(:q AS vector) LIMIT 5"),
         {"q": str(query_embedding)},
     )
-    for row in results:
+    for row in rows:
         print(f"[{row.sim:.3f}] {row.content[:80]}")
 ```
 
 ## See Also
 
 - [Vector Databases Concept](../concepts/vector-databases.md)
-- [Embedding Pipelines](../concepts/embedding-pipelines.md)
+- [Databricks AI Search](../concepts/databricks-ai-search.md)
 - [RAG Pipeline Implementation](rag-pipeline-implementation.md)
+
+## Sources
+
+- https://github.com/pgvector/pgvector
+- https://qdrant.tech/documentation/search/search/
+- https://qdrant.tech/documentation/concepts/hybrid-queries/
+- https://qdrant.tech/documentation/guides/quantization/
+- https://github.com/qdrant/qdrant-client (create_collection, VectorParams, create_payload_index)
+- https://docs.databricks.com/aws/en/ai-search/ai-search/

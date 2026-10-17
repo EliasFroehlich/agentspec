@@ -1,7 +1,7 @@
 # Clean Architecture
 
-> **Purpose**: Clean code structure, naming conventions, module organization, uv for Python projects
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Clean code structure, naming conventions, module organization for Python projects
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -164,50 +164,12 @@ Typical usage:
 """
 ```
 
-## Modern Project Setup with uv
+## Project Setup
 
-```bash
-# Create project with uv (replaces pip, poetry, pyenv, virtualenv)
-uv init my_pipeline --python 3.13
-cd my_pipeline
-
-# Add dependencies
-uv add pydantic sqlalchemy
-uv add pytest ruff --dev
-
-# Run tests
-uv run pytest
-
-# Lock dependencies for reproducibility
-uv lock
-```
-
-### pyproject.toml (uv-managed)
-
-```toml
-[project]
-name = "my-pipeline"
-version = "0.1.0"
-requires-python = ">=3.13"
-dependencies = [
-    "pydantic>=2.0",
-    "sqlalchemy>=2.0",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.8",
-]
-
-[tool.ruff]
-target-version = "py313"
-line-length = 99
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["slow", "integration"]
-```
+Use uv for the environment and lockfile, ruff for lint/format, and a type checker, all pinned to the
+deployment interpreter (`requires-python = ">=3.12"`, ruff `target-version = "py312"` for code that
+runs on Databricks Runtime 17.3 LTS). Commands and a complete `pyproject.toml` (PEP 735
+`[dependency-groups]`, `[tool.pytest]` for pytest 9) are in [Project Tooling](project-tooling.md).
 
 ## Anti-Patterns to Avoid
 
@@ -219,7 +181,7 @@ markers = ["slow", "integration"]
 | Star imports `from x import *` | Namespace pollution | Explicit imports |
 | Circular imports | Architectural issue | Dependency inversion |
 | Print debugging | Not production-safe | `logging` module |
-| `pip install` + `requirements.txt` | Fragile, no lockfile | `uv add` + `uv lock` |
+| Unpinned `pip install` + hand-edited `requirements.txt` | Not reproducible | `uv add` + `uv lock` (`uv pip compile` if a platform needs a requirements file) |
 | Manual venv creation | Error-prone | `uv sync` (auto-creates venv) |
 
 ## See Also
@@ -227,3 +189,4 @@ markers = ["slow", "integration"]
 - [Dataclasses](../concepts/dataclasses.md)
 - [Error Handling](../patterns/error-handling.md)
 - [Type Hints](../concepts/type-hints.md)
+- [Project Tooling](../patterns/project-tooling.md)

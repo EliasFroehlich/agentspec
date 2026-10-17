@@ -1,85 +1,99 @@
 # Airflow Quick Reference
 
-> Fast lookup tables. For code examples, see linked files.
-> MCP Validated: 2026-03-26 | Updated for Airflow 3.0 GA (April 2025)
+> **Purpose**: Fast lookup for Airflow 3.x (stable 3.3.2, 2026-09-17; Python 3.10–3.14). For code, see linked files.
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
+
+## Versions (as of 2026-10-17)
+
+| Release | Date | Headline changes |
+|---------|------|------------------|
+| 3.0.0 | 2025-04-22 | Task SDK (`airflow.sdk`), assets, DAG versioning, React UI, Edge Executor, `airflowctl`; SLA/SubDAG removed |
+| 3.1.0 | 2025-09-25 | Deadline Alerts, HITL operators, `ALL_DONE_MIN_ONE_SUCCESS`; Python 3.9 dropped, 3.13 added |
+| 3.2.0 | 2026-04-07 | Asset partitioning, multi-team (experimental), `SyncCallback`, numeric backoff, Python 3.14 |
+| 3.3.0 | 2026-07-06 | Task/Asset State Store, pluggable retry policies, Java/Go Task SDK (experimental), partition rollups |
+
+## Imports (Airflow 3.x)
+
+| Need | Import |
+|------|--------|
+| Authoring | `from airflow.sdk import dag, task, DAG, task_group, TaskGroup, TriggerRule, chain, Label` |
+| Assets | `from airflow.sdk import Asset, AssetAlias, AssetWatcher, asset, Metadata` |
+| Hooks/conn/vars | `from airflow.sdk import BaseHook, Connection, Variable, get_current_context` |
+| Deadlines (3.2+ path) | `from airflow.sdk import DeadlineAlert, DeadlineReference, AsyncCallback, SyncCallback` |
+| Retry policy (3.3+) | `from airflow.sdk import ExceptionRetryPolicy, RetryRule, RetryAction` |
+| Core operators/sensors | `airflow.providers.standard.operators.{python,bash,empty,trigger_dagrun,hitl}`, `...sensors.external_task` |
 
 ## Operator Selection Matrix
 
-| Task Type | Recommended Operator | Notes |
-|-----------|---------------------|-------|
-| Python function | `@task` (TaskFlow) | Modern default |
-| Shell command | `BashOperator` | Simple CLI tasks |
-| dbt run/test | `DbtCloudRunJobOperator` | Or BashOperator for dbt Core |
-| Spark job | `SparkSubmitOperator` | Or `DatabricksSubmitRunOperator` |
-| BigQuery SQL | `BigQueryInsertJobOperator` | Native GCP integration |
-| Snowflake SQL | `SnowflakeOperator` | Via snowflake provider |
-| Wait for file | `S3KeySensor` (deferrable) | Use deferrable=True |
-| Wait for DAG | `ExternalTaskSensor` | Or dataset-driven scheduling |
-| HTTP request | `SimpleHttpOperator` | For API calls |
+| Task type | Recommended | Notes |
+|-----------|-------------|-------|
+| Python function | `@task` (TaskFlow) | Default choice |
+| Shell command | `@task.bash` / `BashOperator` (standard provider) | |
+| SQL on any DB | `SQLExecuteQueryOperator` (common.sql) | Snowflake, Postgres, ... |
+| dbt Cloud | `DbtCloudRunJobOperator(deferrable=True)` | dbt Core: `@task.bash` |
+| Databricks | `DatabricksSubmitRunOperator` / `DatabricksRunNowOperator` (deferrable) | |
+| BigQuery | `BigQueryInsertJobOperator(deferrable=True)` | |
+| HTTP call | `HttpOperator` (http provider) | Deferrable |
+| Wait for file | `S3KeySensor(deferrable=True)` | |
+| Wait for data from another Dag | Asset schedule (`schedule=[asset]`) | `ExternalTaskSensor` only for task-level coupling |
+| Human approval | `ApprovalOperator` / `HITLOperator` | 3.1+ |
 
-## TaskFlow vs Classic
+## Schedules
 
-| Feature | Classic | TaskFlow API |
-|---------|---------|-------------|
-| Syntax | `PythonOperator(python_callable=fn)` | `@task def fn():` |
-| XCom | `ti.xcom_push/pull` | Return value = automatic XCom |
-| Dependencies | `task1 >> task2` | Same, or implicit from data flow |
-| Dynamic mapping | `expand()` on operator | `fn.expand(arg=list)` |
-| Readability | Verbose | Pythonic |
+| Expression | Meaning | Since |
+|------------|---------|-------|
+| `"0 6 * * *"` (bare cron) | `CronTriggerTimetable` by default in 3.x: `logical_date` = trigger time | 3.0 default |
+| `schedule=[a1, a2]` / `(a1 & a2)` / `(a1 \| a2)` | Asset-driven (all / and / or) | 3.0 |
+| `Asset(..., watchers=[AssetWatcher(...)])` | External event (Kafka, SQS) | 3.0 |
+| `AssetOrTimeSchedule(...)` | Asset events or a timetable | 3.0 |
+| `CronPartitionTimetable` / `PartitionedAssetTimetable` | Partitioned producer / consumer | 3.2 |
+| `RollupMapper`, `FanOutMapper`, `PartitionedAtRuntime` | Partition rollups / fan-out / runtime keys | 3.3 |
 
-## Airflow 3.0 Key Changes (GA April 2025)
+## Removed / renamed (migration)
 
-| Feature | Description |
+| Removed | Use instead |
 |---------|-------------|
-| **Asset-aware scheduling** | `@asset` decorator + `Asset()` for event-driven DAG triggering |
-| **DAG Versioning** | Tracks and saves DAG code at each execution for debugging |
-| **React-based UI** | New modern UI with dark mode, asset + task navigation views |
-| **Task Execution API** | Decouples task execution from scheduler; enables remote execution |
-| **Backfill improvements** | Run backfills within scheduler; launch from UI or API |
-| **`airflow.sdk` imports** | New SDK module: `from airflow.sdk import DAG, task, asset` |
-| **Dataset renamed to Asset** | `Dataset()` is now `Asset()` in Airflow 3.0 |
-| **AND/OR asset logic** | `(asset1 & asset2)` or `(asset1 \| asset2)` for complex triggers |
+| `Dataset` (2.x) | `Asset` (3.0) |
+| `SimpleHttpOperator` (http provider 5.0.0) / `SnowflakeOperator` (snowflake 6.0.0) | `HttpOperator` / `SQLExecuteQueryOperator` |
+| 3.0: SLA (`sla=`, `sla_miss_callback`) | Deadline Alerts (3.1+), see `concepts/deadline-alerts.md` |
+| 3.0: SubDAGs | TaskGroups, assets |
+| 3.0: `execution_date` (and `next_ds`, `prev_ds`, ...) in context | `logical_date`, `data_interval_start/end` |
+| 3.0: SequentialExecutor; CeleryKubernetes/LocalKubernetes executors | LocalExecutor; multi-executor `executor = CeleryExecutor,KubernetesExecutor` |
+| 3.0: direct metadata DB access from task code | Task SDK APIs / REST API |
+| 3.0: `[scheduler] dag_dir_list_interval` | `[dag_processor] refresh_interval` |
 
-## Schedule Intervals
+## Config: `[dag_processor]` (3.x)
 
-| Expression | Meaning | Version |
-|-----------|---------|---------|
-| `@daily` | Midnight UTC | All |
-| `@hourly` | Every hour | All |
-| `0 6 * * 1-5` | 6 AM UTC weekdays | All |
-| `Asset("s3://bucket/data")` | When upstream asset updates | **3.0+** |
-| `Dataset("s3://bucket/data")` | When upstream dataset updates | 2.4+ (deprecated in 3.0) |
-| `(asset1 & asset2)` | When BOTH assets update | **3.0+** |
-| `(asset1 \| asset2)` | When EITHER asset updates | **3.0+** |
-| `Timetable(...)` | Custom schedule logic | 2.2+ |
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `refresh_interval` | 300 | Seconds between scans of a Dag bundle for new files |
+| `min_file_process_interval` | 30 | Seconds between re-parses of a Dag file |
+| `parsing_processes` | 2 | Parallel parsing processes |
+| `dag_file_processor_timeout` | 50 | Seconds before a file-processor is killed |
 
-## Orchestrator Comparison
+## Executors (3.x)
 
-| Feature | Airflow 3.x | Dagster | Prefect 3.x |
-|---------|------------|---------|-------------|
-| Paradigm | Task + Asset hybrid | Asset-centric | Flow-centric |
-| Learning curve | Medium | Medium-High | Low |
-| UI quality | **Modern React UI** | Excellent | Good |
-| Data lineage | **Asset-aware** | Built-in | Limited |
-| Testing story | Improved | First-class | Good |
-| Remote execution | **Task Execution API** | Built-in | Cloud-native |
-| Community size | Largest (30M+ monthly downloads) | Growing fast | Medium |
-| Ops burden | Medium (improved in 3.0) | Medium | Low (Cloud) |
-| Best for | Enterprise-scale, hybrid execution | Data lineage focus | Python DX |
+Local: `LocalExecutor` (default). Queued: `CeleryExecutor`, `BatchExecutor`, `EdgeExecutor` (provider `edge3`).
+Containerized: `KubernetesExecutor`, `EcsExecutor`. Combine with a comma list; the first is the default and
+tasks pick another with `executor="..."`.
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| Top-level imports in DAG file | Import inside `@task` functions |
-| Hardcode connections | Use `Connection` objects + Variables |
-| Monolithic tasks (ETL in one) | One task per logical step |
-| Skip retries | `retries=2, retry_delay=timedelta(minutes=5)` |
-| Use sensors without deferrable | `deferrable=True` saves worker slots |
+| Heavy top-level code in Dag files | Imports and I/O inside tasks (files re-parse every 30 s by default) |
+| Large values in XCom | Pass references; or `XComObjectStorageBackend` with `xcom_objectstorage_threshold` |
+| `ti.xcom_pull(key=...)` without `task_ids` | Pass `task_ids` (3.0 pulls only from the current task by default) |
+| Blocking sensors for long waits | `deferrable=True` (requires a running triggerer) |
+| Hand-built Slack/email operators in callbacks | Notifiers: `SlackWebhookNotifier`, `SmtpNotifier`, `PagerdutyNotifier` |
 
 ## Related Documentation
 
-| Topic | Path |
-|-------|------|
-| Getting Started | `concepts/dag-design.md` |
-| Full Index | `index.md` |
+Getting started: `concepts/dag-design.md` · Full index: `index.md`
+
+## Sources
+
+https://airflow.apache.org/docs/apache-airflow/stable/release_notes.html · https://airflow.apache.org/docs/apache-airflow/stable/installation/prerequisites.html · https://airflow.apache.org/docs/apache-airflow/stable/installation/upgrading_to_airflow3.html
+https://airflow.apache.org/docs/task-sdk/stable/api.html · https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html · https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/executor/index.html
+https://airflow.apache.org/docs/apache-airflow-providers-http/stable/changelog.html · https://airflow.apache.org/docs/apache-airflow-providers-snowflake/stable/changelog.html · https://airflow.apache.org/docs/apache-airflow-providers-common-io/stable/xcom_backend.html

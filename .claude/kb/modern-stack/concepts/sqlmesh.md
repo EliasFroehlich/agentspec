@@ -1,119 +1,136 @@
 # SQLMesh
 
-> **Purpose**: SQLMesh virtual environments, change categories, automatic backfills, column-level lineage, plan/apply workflow
-> **MCP Validated**: 2026-03-26
+> **Purpose**: SQLMesh virtual data environments, change categories, plan-based deploys, built-in scheduler, governance (Linux Foundation), and the 2026 comparison with dbt v2
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-SQLMesh is a data transformation framework that improves on dbt with virtual environments (no data duplication for dev/staging), automatic change classification, built-in scheduling, and column-level lineage. It can also run dbt projects via its compatibility layer, now including a dedicated `dbt` CLI wrapper.
+SQLMesh is an Apache-2.0 data transformation framework for SQL and Python models. It parses SQL with SQLGlot, so it can classify changes, compute minimal backfills, and show column-level lineage. Its virtual data environments let dev environments reuse production tables. It also runs existing dbt projects. Current release: **0.236.3 (2026-10-06)**. The repository is `github.com/SQLMesh/sqlmesh`.
 
-**Key 2025 developments (v0.210 - v0.231):**
-- **Microsoft Fabric Warehouse support** (Aug 2025) -- proper MERGE statements and alter table workarounds for Fabric
-- **dbt CLI compatibility** -- `--project-dir`, `--profiles-dir`, `--log-level`, `--profile`, `--target` flags
-- **Built-in linter rules** -- `NoMissingUnitTest` and others for code quality enforcement
-- **VSCode multi-project support** -- work with multiple SQLMesh projects simultaneously
-- **Table Diff view in VSCode** -- visual comparison of data changes
-- **Dev-only VDE mode** -- virtual dev environments optimized for development workflows
-- **`on_additive_change` support** -- handle additive model changes without full backfill
-- **`ignore_destructive` support** -- safety guardrails for destructive schema changes
-- **BigQuery materialized views** -- column types and comments support for Databricks MV
+## Ownership and Governance (2025–2026)
+
+| Date | Event |
+|------|-------|
+| 2025-09-03 | Fivetran acquires Tobiko Data, the company behind SQLMesh and SQLGlot |
+| 2026-03-10 | First meeting of the SQLMesh Technical Steering Committee (TSC) |
+| 2026-03-25 | Fivetran contributes SQLMesh to the Linux Foundation ("will remain vendor neutral") |
+| 2026-06-01 | Fivetran completes its merger with dbt Labs (announced 2025-10-13) |
+
+SQLMesh is now "a project of the Linux Foundation" (a Series of LF Projects, LLC). A TSC with a consensus-based charter runs it. The company that funds SQLMesh development also owns dbt. So the choice between the two is about technical fit, not about competing vendors.
+
+## The Concept
+
+```bash
+sqlmesh init duckdb          # scaffold a project for an engine (interactive if omitted)
+sqlmesh plan dev             # diff vs prod, categorize changes, prompt "Apply - Backfill Tables [y/n]"
+sqlmesh fetchdf "SELECT * FROM marts__dev.mart_revenue LIMIT 10"   # dev views live in <schema>__dev
+sqlmesh plan                 # target prod: promote with a virtual update (no recompute when reused)
+sqlmesh run                  # scheduler: run models whose cron interval is due
+sqlmesh plan dev --auto-apply   # non-interactive (CI)
+```
+
+There is no separate apply command. The SQLMesh FAQ says: "There is no 'apply' command in SQLMesh". `sqlmesh plan` both builds the plan and applies it, after a prompt or with `--auto-apply`.
 
 ## Key Concepts
 
-### Virtual Environments
+### Virtual Data Environments
 
-Unlike dbt (which creates full schema copies for dev), SQLMesh uses virtual environments that point to the same physical tables via views. This means:
-- Zero data duplication for dev/staging environments
-- Instant environment creation
-- Safe testing against production data without copies
+Every model version is stored in a physical table keyed by a fingerprint. Environments are sets of views over those tables. A model `marts.mart_revenue` in environment `dev` is queried as `marts__dev.mart_revenue`. Unchanged models reuse production tables. When a dev plan is promoted, prod gets a **virtual update**: views are re-pointed, with no backfill.
 
 ### Change Categories
 
-When you modify a model, SQLMesh classifies the change:
+| Category | Directly modified model | Downstream models |
+|----------|-------------------------|-------------------|
+| **Breaking** | Backfilled | Backfilled |
+| **Non-breaking** (e.g. new column) | Backfilled | Not backfilled |
+| **Forward-only** (`--forward-only` or model setting) | Keeps the existing physical table in prod | Not backfilled |
 
-| Category | Description | Action |
-|----------|-------------|--------|
-| **Breaking** | Column removed, type changed, logic altered | Full backfill of model + all downstream |
-| **Non-breaking** | New column added, comment changed | Forward-only (no backfill needed) |
-| **Metadata-only** | Description, tags, owner changed | No data operation |
+SQLMesh categorizes changes automatically by default (`auto_categorize_changes`). Indirectly modified models inherit the category from upstream changes.
 
-### Plan/Apply Workflow
+### Lineage, Linting, Tooling
 
-```bash
-# Preview what will change (like terraform plan)
-sqlmesh plan dev
+- Column-level lineage is shown in the SQLMesh browser UI (`sqlmesh ui`). It also works for dbt projects run through SQLMesh. There is no `sqlmesh lineage` CLI command.
+- Linter (off by default; `linter: enabled: true`). Built-in rules: `ambiguousorinvalidcolumn`, `invalidselectstarexpansion`, `noselectstar`, `nomissingaudits`, `nomissingunittest`. Custom rules go in `linter/`.
+- VS Code extension (preview): model lineage view, completions, linter diagnostics, formatting.
+- Engines include DuckDB, Databricks, Snowflake, BigQuery, Fabric, Spark, Trino, Postgres, Redshift and others. Tool integrations: dbt, dlt, GitHub Actions, Kestra. The current CLI reference has no Airflow integration flag.
 
-# Apply changes to dev environment
-sqlmesh apply dev
+## SQLMesh vs dbt (2026-10)
 
-# Promote dev → prod
-sqlmesh plan prod
-sqlmesh apply prod
-```
+dbt v2.0 had its initial release on 2026-09-14 (version table). dbt Labs announced GA on 2026-09-16. There are two distributions:
 
-### Column-Level Lineage
+- **"dbt"**: the former Fusion engine. The default distribution, free with no login required, with code that is not 100% Apache 2.0.
+- **"dbt OSS"**: the former dbt Core v2. A subset distribution, 100% Apache 2.0.
 
-SQLMesh tracks lineage at the column level, not just the model level:
+dbt Core **1.13** (in beta) will be the last 1.x minor release.
 
-```bash
-# Show which upstream columns feed into a specific column
-sqlmesh lineage mart_revenue.total_amount
-
-# Output:
-# mart_revenue.total_amount
-#   ← int_orders.net_amount
-#     ← stg_orders.quantity × stg_orders.unit_price
-```
-
-### Built-in Scheduler
-
-SQLMesh includes a scheduler (no Airflow required for simple setups):
-
-```bash
-# Run all models that need updating
-sqlmesh run
-
-# Run with Airflow integration
-sqlmesh plan --enable-airflow
-```
-
-## SQLMesh vs dbt Comparison (2025)
-
-| Feature | SQLMesh | dbt Core |
-|---------|---------|----------|
-| Environments | Virtual (no data copy) | Full schema clone |
-| Change detection | Automatic (breaking/non-breaking) via SQLGlot | Manual (full refresh or incremental) |
-| Backfill | Automatic, minimal (affected models only) | Manual via --full-refresh |
-| Lineage | Column-level (native) | Model-level (Fusion for column-level) |
-| Scheduler | Built-in | Requires Airflow/Dagster |
-| Testing | Built-in audits + tests + linter rules | schema.yml tests + sqlfluff |
-| SQL validation | Compile-time (SQLGlot parse) | Run-time (Jinja template) |
-| dbt compatibility | Yes (CLI wrapper + adapter) | Native |
-| IDE | VSCode extension (OSS) + web UI | dbt Cloud IDE or dbt Power User |
-| Execution speed | ~9x faster (benchmarked) | Baseline (Fusion: 30x parse speed) |
-| State management | Built-in, stateful | Stateless (relies on manifest) |
-| Fabric Warehouse | Yes (Aug 2025) | Yes |
+| Feature | SQLMesh | dbt (v2) | dbt OSS (v2) |
+|---------|---------|----------|--------------|
+| Dev environments | Virtual (views over fingerprinted tables) | Separate target schemas | Same as dbt |
+| Change impact | Semantic diff + automatic categorization | State comparison (`state:modified`) | Same |
+| Backfill | Automatic, only affected models/intervals | `--full-refresh` / incremental strategies | Same |
+| Scheduling | Built-in (`sqlmesh run`, cron per model) | External orchestrator or dbt platform jobs | External |
+| Column-level lineage | SQLMesh UI | Local with `static_analysis: strict` (VS Code extension, Docs v2) | Not included |
+| SQL comprehension, linting, LSP | SQLGlot parse + linter | Included | Not included |
+| Runs dbt projects | Yes (`sqlmesh init -t dbt`) | Native | Native |
+| License | Apache 2.0 | Mixed (see dbt licenses FAQ) | Apache 2.0 |
 
 ## When to Use
 
-- **Choose SQLMesh** when: column-level lineage matters, you want zero-cost dev environments, you need automatic change classification, or you're starting fresh
-- **Choose dbt** when: team already knows dbt, ecosystem packages are critical (dbt_utils, dbt_expectations), or dbt Cloud features needed (CI/CD, IDE, semantic layer)
+- **SQLMesh**: you want cheap dev environments (virtual updates), automatic change classification and backfills, or a built-in scheduler. It is also a good fit when starting a new project, or when you want to run an existing dbt project with these features.
+- **dbt**: the team and its packages are already on dbt, you need dbt platform features (e.g. dbt Mesh, dbt Catalog), or you want the larger ecosystem of adapters and packages.
+
+## Common Mistakes
+
+### Wrong
+
+```bash
+sqlmesh apply dev                 # no such command
+sqlmesh plan --enable-airflow     # not in the CLI reference
+sqlmesh lineage model.column      # no such command
+```
+
+### Correct
+
+```bash
+sqlmesh plan dev                  # review, then answer the apply prompt
+sqlmesh plan dev --auto-apply     # CI
+sqlmesh ui                        # column-level lineage in the browser UI
+```
 
 ## Trade-offs
 
 | Pros | Cons |
 |------|------|
-| Virtual environments save storage/compute | Smaller community than dbt (3K GitHub stars vs 10K+) |
-| Automatic change detection reduces errors | Fewer third-party packages |
-| Column-level lineage for impact analysis | Learning curve for dbt users |
-| Built-in scheduler simplifies stack | Less mature cloud offering |
-| ~9x faster execution than dbt Core | Rapid release cadence may require frequent updates |
-| Compile-time SQL validation catches errors earlier | SQLGlot parser may not support all SQL dialects perfectly |
-| OSS VSCode extension with multi-project support | Ecosystem packages (dbt_utils equivalent) still limited |
-| Built-in linter rules (NoMissingUnitTest) | State DB adds operational overhead |
+| Virtual environments avoid copying data for dev | Smaller package/adapter ecosystem than dbt |
+| Automatic change categorization and minimal backfills | State database to operate (environments, intervals) |
+| Built-in scheduler and audits | Learning curve for dbt users (MODEL blocks, macros) |
+| Neutral governance (Linux Foundation, TSC) | Frequent 0.x releases; pin the version |
 
-## See Also
+## Related
 
 - [sqlmesh-workflow](../patterns/sqlmesh-workflow.md)
 - [analytics-engineering](../concepts/analytics-engineering.md)
 - [duckdb](../concepts/duckdb.md)
+
+## Sources
+
+- https://github.com/SQLMesh/sqlmesh/releases
+- https://github.com/SQLMesh/sqlmesh/blob/main/GOVERNANCE.md
+- https://www.fivetran.com/press/fivetran-acquires-tobiko-data-to-power-the-next-generation-of-advanced-ai-ready-data-transformation
+- https://www.linuxfoundation.org/press/linux-foundation-welcomes-sqlmesh-project
+- https://www.fivetran.com/press/fivetran-dbt-labs-complete-merger-to-create-the-data-infrastructure-for-trusted-ai-agents
+- https://sqlmesh.readthedocs.io/en/latest/reference/cli/
+- https://sqlmesh.readthedocs.io/en/latest/faq/faq/
+- https://sqlmesh.readthedocs.io/en/latest/concepts/plans/
+- https://sqlmesh.readthedocs.io/en/latest/concepts/environments/
+- https://sqlmesh.readthedocs.io/en/latest/guides/linter/
+- https://sqlmesh.readthedocs.io/en/latest/guides/vscode/
+- https://sqlmesh.readthedocs.io/en/latest/integrations/overview/
+- https://docs.getdbt.com/docs/dbt-versions
+- https://docs.getdbt.com/blog/dbt-v2-is-ga
+- https://docs.getdbt.com/blog/comparing-dbt-and-dbt-oss
+- https://docs.getdbt.com/docs/explore/column-level-lineage
+- https://docs.getdbt.com/reference/node-selection/methods
+- https://docs.getdbt.com/docs/core/connect-data-platform/connection-profiles
+- https://www.getdbt.com/licenses-faq

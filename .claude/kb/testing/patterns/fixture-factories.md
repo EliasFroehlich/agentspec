@@ -1,7 +1,7 @@
 # Fixture Factories
 
 > **Purpose**: Factory function patterns for generating reusable, customizable test data
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -14,10 +14,10 @@
 ## Implementation
 
 ```python
-import pytest
-from datetime import date, timedelta
-from typing import Optional
 from dataclasses import dataclass
+from datetime import date, timedelta
+
+import pytest
 
 
 # --- Domain Model ---
@@ -28,10 +28,10 @@ class Invoice:
     vendor: str
     amount: float
     currency: str = "USD"
-    issue_date: date = None
+    issue_date: date | None = None
     status: str = "pending"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.issue_date is None:
             self.issue_date = date.today()
 
@@ -44,11 +44,11 @@ def make_invoice():
     counter = 0
 
     def _factory(
-        invoice_number: Optional[str] = None,
+        invoice_number: str | None = None,
         vendor: str = "Acme Corp",
         amount: float = 100.00,
         currency: str = "USD",
-        issue_date: Optional[date] = None,
+        issue_date: date | None = None,
         status: str = "pending",
     ) -> Invoice:
         nonlocal counter
@@ -133,17 +133,20 @@ def test_api_create_invoice(api_client, make_invoice_dict):
 ## Spark DataFrame Factory
 
 ```python
+INVOICE_DDL = "invoice_id STRING NOT NULL, vendor STRING, amount DOUBLE"
+
+
 @pytest.fixture
 def make_spark_df(spark):
-    """Factory for creating test DataFrames."""
-    def _factory(data=None, schema=None):
+    """Factory for creating test DataFrames with an explicit schema."""
+    def _factory(data=None, schema: str = INVOICE_DDL):
         if data is None:
             data = [
                 ("INV-001", "Acme", 100.0),
                 ("INV-002", "Beta", 200.0),
             ]
-        if schema is None:
-            schema = ["invoice_id", "vendor", "amount"]
+        # Explicit DDL instead of column names: no type inference surprises (an all-NULL
+        # column cannot be inferred) and types match what ANSI-mode casts expect.
         return spark.createDataFrame(data, schema=schema)
 
     return _factory
@@ -181,3 +184,8 @@ def test_transform_with_factory(make_spark_df):
 - [Parametrize](../concepts/parametrize.md)
 - [Unit Test Patterns](../patterns/unit-test-patterns.md)
 - [Spark Testing](../patterns/spark-testing.md)
+
+## Sources
+
+- https://docs.pytest.org/en/stable/how-to/fixtures.html
+- https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.SparkSession.createDataFrame.html

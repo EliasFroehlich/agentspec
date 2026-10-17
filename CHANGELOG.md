@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-10-17
+
+KB and agent refresh. 19 data domains and 46 agents were audited claim by claim against official documentation, release notes and vendor repositories (2026-10-17), then rewritten where they had drifted and corrected elsewhere. Every rewritten file carries `MCP Validated: 2026-10-17` and a `## Sources` section; code examples were executed where a runtime was available (PySpark 4.0/4.1, pydantic 2.10/2.13/2.14, pytest 9, GX 1.24, Soda Core 4.27, dbt-core 1.12, Airflow 3.3, DuckDB 1.5, Polars 2.0, ShellCheck 0.11).
+
+### Added
+
+- **`metric-views` KB domain** — Unity Catalog metric views: YAML spec 1.1, `MEASURE()`, joins/star schemas, window measures, parameters, materialization, agent metadata, `CREATE OR REPLACE` × grants/tags semantics, deploy with bundles.
+- **New KB files** — `spark`: ansi-mode, photon, python-udfs, transform-with-state, version-matrix (DBR 17.3 LTS / 18 LTS / 19); `lakeflow`: python-module-migration, lakeflow-connect, flows-and-sinks, jobs-bundle-yaml, lakeflow-jobs, bundles-cli; `lakehouse`: liquid-clustering, unity-catalog-iceberg; `data-quality`: databricks-data-quality, databricks-native-dq, pyspark-validation-libs, datacontract-cli-workflow; `dbt`: dbt-databricks-adapter; `python`: python-versions, project-tooling; `pydantic`: strict-and-config; `testing`: async-testing, property-based-testing; `airflow`: deadline-alerts; `streaming`: debezium-operations, flink-cdc-pipelines; `genai`: anthropic-api-surface, databricks-agent-platform; `ai-data-engineering`: databricks-ai-search, genie-agents, databricks-native-rag, uc-feature-engineering.
+
+### Changed
+
+- **`lakeflow`** — teaches Lakeflow Spark Declarative Pipelines with `from pyspark import pipelines as dp` and `CREATE FLOW … AS AUTO CDC INTO` (the `dlt` module and `APPLY CHANGES` appear only as legacy), current limits and channels, and Lakeflow Jobs / Declarative Automation Bundles (ex-DABs), including the Terraform engine removal in Databricks CLI 1.20.0. All `/dlt/` doc URLs replaced.
+- **`spark`, `sql-patterns`** — Spark 4.0–4.2 and DBR 17.3 LTS / 18 LTS / 19: ANSI mode by default and `try_*`, Spark Connect, `shuffle.partitions=auto`, Photon, liquid clustering; corrected Spark cells in the SQL dialect matrices.
+- **`lakehouse`, `medallion`, `data-modeling`** — Delta 4.4, Iceberg 1.12 (v3), DuckLake 1.0, UC managed/foreign Iceberg; liquid clustering / `CLUSTER BY AUTO` as the Databricks default; schema changes as explicit DDL; identity-column concurrency caveat; `overwriteSchema` and `input_file_name()` shown only as anti-patterns.
+- **`data-quality`, `dbt`** — ODCS v3.2.0 contracts validated against the official JSON Schema, datacontract-cli 1.2.x, Soda Core 4 contract grammar, GX Core 1.24 API, Databricks-native quality; dbt v2 (Fusion engine) vs Core 1.12, `data_tests:` + `arguments:`, dbt-databricks.
+- **`python`, `pydantic`, `testing`** — Python 3.12–3.15 with a runtime-first rule (DBR 17.3 LTS = Python 3.12.3, pydantic 2.10.6), pydantic 2.10→2.14 version gates, pytest 9 and pytest-asyncio 1.x, `pyspark.testing` with ANSI.
+- **`airflow`, `streaming`, `modern-stack`, `cloud-platforms`** — Airflow 3.3 (Task SDK, Deadline Alerts, assets), Kafka 4.x KRaft, Flink 2.x, Debezium 3.x, DuckDB 1.5, Polars 2.0, SQLMesh × dbt v2, BigQuery AI function signatures, prices dated "as of 2026-10-17".
+- **`genai`, `prompt-engineering`, `ai-data-engineering`** — provider-native structured outputs, adaptive thinking/effort, the real Claude Agent SDK API, MCP with `mcp` 2.x, LangChain/LangGraph 1.x, Langfuse v5, MLflow 3 GenAI evaluation, and the Databricks GenAI layer (Genie Agents, Agent Bricks, AI Search, AI Functions, Feature Engineering in UC).
+- **Agents** — 46 agents updated to match the corrected KB (lakeflow, spark, lakehouse/medallion/schema, data-quality/contracts/dbt, python/test, airflow/streaming, genai/LLM); `kb/_index.yaml`, `kb/README.md`, `agents/README.md` and the agent-router resynced with the files on disk.
+
+### Fixed
+
+- **MCP tool names in 21 agents** — `mcp__upstash-context-7-mcp__*` → `mcp__context7__*` and `mcp__exa__get_code_context_exa` → `mcp__exa__web_search_exa`/`web_fetch_exa`, so those agents actually receive the documentation tools they reference.
+- **Broken examples** — `Field(strip_whitespace=True)` (never stripped), `Field(discriminator=…)` on a list (TypeError), async fixtures under pytest 9 strict mode, an SCD2 merge that never re-inserted changed rows, SQL comments inside `{{ config() }}` (breaks Jinja), shell templates that aborted under `set -e`, Delta streaming sink in `update` mode.
+
+### Removed
+
+- **Third-party client context** — production hostnames, credential IDs and project names from other engagements in `qdrant-specialist`, `supabase-specialist` and two `lakeflow` patterns.
+
 ## [3.6.0] - 2026-09-17
 
 ### Added

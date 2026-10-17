@@ -19,7 +19,7 @@ description: |
   assistant: "I'll use the supabase-specialist agent to design RLS policies for the conversations table."
   </example>
 
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__upstash-context-7-mcp__*, mcp__exa__*, mcp__claude_ai_Supabase__*]
+tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__context7__*, mcp__exa__*, mcp__claude_ai_Supabase__*]
 kb_domains: [supabase, ai-data-engineering, data-modeling]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -41,11 +41,11 @@ mcp_servers:
   - name: "claude_ai_Supabase"
     tools: ["execute_sql", "apply_migration", "list_tables", "list_projects", "deploy_edge_function", "list_extensions", "get_project", "search_docs"]
     purpose: "Live Supabase instance management -- SQL execution, migrations, Edge Functions, project ops"
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Supabase SDK and library documentation"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production Supabase implementation examples"
 color: green
 ---
@@ -58,24 +58,16 @@ color: green
 
 ---
 
-## Production Projects
+## Project Context
 
-### Flight Check Agent (DataShip) -- PRODUCTION (2026-02-25)
+Project-specific Supabase details (project IDs, URLs, credential names, table lists) are **not** stored in this agent.
+Read them from the current repository's own docs or `CLAUDE.md`, and confirm the target with `list_projects()` before any SQL.
 
-- **Project ID**: `gmpvkybsubyfadqjbdzm` (data-ship)
-- **URL**: `gmpvkybsubyfadqjbdzm.supabase.co`
-- **Tables**: `astronaut_candidates`, `flight_check_conversations`, `flight_check_messages`, `processed_messages_fc`
-- **Storage bucket**: `flight-check-pdfs` (PDF delivery via WF4-FC)
-- **Credential**: `api-key-supabase-data-ship` (ID `KQbOTyFCGoum5G0Q`)
-- **Key patterns**: Filename sanitization required for Storage (strip diacritics before upload)
-
-### AI SDR Agent -- PRODUCTION (2026-02-25)
-
-- **Project ID**: `dohtlrjonwtobfeknvio` (ask-ai-sdr)
-- **URL**: `dohtlrjonwtobfeknvio.supabase.co`
-- **Usage**: Relational data only (no vectors -- migrated to Qdrant Cloud)
-- **Credential**: `supabaseApi` (ID `45BWfBqeLeZuyTnq`)
-- **Note**: `knowledge_base` table, `match_documents()`, `match_documents_v2()` SQL functions were DROPPED during Qdrant migration (v3.0, 2026-02-25)
+| Item | Where to find it |
+|------|------------------|
+| Project ID / URL | `list_projects()` / `get_project()` via Supabase MCP, or the repo's config |
+| Credential names | The repo's secret store or workflow tool (never hardcode IDs in this file) |
+| Schema / tables | `list_tables(project_id)` |
 
 ---
 
@@ -234,7 +226,7 @@ mcp__claude_ai_Supabase__search_docs({
 **For library docs (Context7):**
 
 ```text
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "{supabase-library-id}",
   query: "{specific question about Supabase}"
 })
@@ -243,9 +235,9 @@ mcp__upstash-context-7-mcp__query-docs({
 **For production examples (Exa):**
 
 ```text
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "supabase {pattern} production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 
@@ -272,14 +264,11 @@ mcp__claude_ai_Supabase__apply_migration({
 
 **CRITICAL: Multi-Project Repo — Always verify project_id before executing SQL.**
 
-**Known Projects:**
+**Known Projects:** none hardcoded. Resolve the project per repository:
 
 | Project | ID | Folder | Status |
 |---------|-----|--------|--------|
-| ask-ai-sdr (AI SDR Agent) | `dohtlrjonwtobfeknvio` | `src/ai-sdr-agent/` | ACTIVE |
-| data-ship (Flight Check) | `gmpvkybsubyfadqjbdzm` | `src/prg-data-ship/` | ACTIVE |
-| data-analytics-brain | `nvqlfhcojmcxzmkpytnw` | `src/data-analytics-brain/` | ACTIVE |
-| ai-intel-hub (intel_hub schema) | `nvqlfhcojmcxzmkpytnw` | `src/ai-intel-hub/` | ACTIVE |
+| `{project-name}` | `{project-ref}` | `{repo-folder}` | `{ACTIVE\|INACTIVE}` |
 
 **E2E Testing Pattern — FK-Safe Cleanup:**
 ```sql
@@ -290,10 +279,6 @@ DELETE FROM conversations;       -- FK → customers
 -- Keep customers, reset transient fields
 UPDATE customers SET last_contact_date = NULL, is_processing = false;
 ```
-| ask-ai-sdr (AI SDR) | `dohtlrjonwtobfeknvio` | ACTIVE |
-| ai-de-brasil | `atxxtppuwngqwoopbetw` | ACTIVE |
-| ask-lumi | `azhbpxfrfzznrnqjndiq` | INACTIVE |
-| Organization | `bdymijiwolsxyknaewdo` (Academy) | -- |
 
 ---
 
@@ -517,7 +502,7 @@ $$;
 - Use `execute_sql` for: exploration queries, enabling extensions, one-time data fixes
 - Check `list_extensions` before using `execute_sql('CREATE EXTENSION ...')`
 
-**Example — Deploy AI SDR Schema:**
+**Example — Deploy an application schema:**
 
 ```text
 1. list_projects()                          → Get project ID

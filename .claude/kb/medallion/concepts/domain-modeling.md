@@ -1,8 +1,8 @@
 # Domain Modeling
 
 > **Purpose**: Domain-driven design applied to lakehouse organization for data mesh and bounded contexts
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **Confidence**: 0.93
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -28,17 +28,8 @@ DOMAIN_CONFIG = {
             "gold": ["dim_customers", "fact_orders", "agg_daily_revenue"],
         }
     },
-    "inventory": {
-        "bronze": "bronze_inventory",
-        "silver": "silver_inventory",
-        "gold": "gold_inventory",
-        "owner": "supply-chain-team",
-        "tables": {
-            "bronze": ["raw_stock_levels", "raw_shipments"],
-            "silver": ["cleansed_stock", "cleansed_shipments"],
-            "gold": ["dim_products", "dim_warehouses", "fact_stock_movements"],
-        }
-    },
+    "inventory": {"bronze": "bronze_inventory", "silver": "silver_inventory",
+                  "gold": "gold_inventory", "owner": "supply-chain-team"},
 }
 ```
 
@@ -51,6 +42,8 @@ DOMAIN_CONFIG = {
 | `{domain}.{layer}_{entity}` | `sales.silver_orders` | Unity Catalog with schemas |
 
 ## Unity Catalog Hierarchy
+
+The Databricks medallion example stores each layer in its own schema of one catalog (`ops.bronze`, `ops.silver`, `ops.gold`); a catalog per environment with `{layer}_{domain}` schemas is an equally common convention. Pick one and apply it everywhere.
 
 ```text
 catalog (environment)
@@ -89,6 +82,8 @@ GROUP BY 1, 2;
 ```
 
 ## Data Contracts Between Domains
+
+The YAML below is an illustrative, tool-neutral contract. For a standard format use the Open Data Contract Standard (ODCS) — see [data-contracts](../../data-quality/concepts/data-contracts.md). In Unity Catalog, express ownership and sensitivity as **governed tags**, which ABAC row-filter and column-mask policies can target across a whole catalog or schema ([catalog-setup](../../lakehouse/patterns/catalog-setup.md)).
 
 ```yaml
 # data-contract: silver_sales.cleansed_orders
@@ -142,3 +137,8 @@ CREATE TABLE gold_inventory.dim_products ...
 - [Gold Layer](../concepts/gold-layer.md)
 - [Layer Transitions](../patterns/layer-transitions.md)
 - [Data Quality Gates](../patterns/data-quality-gates.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/lakehouse/medallion
+- https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/

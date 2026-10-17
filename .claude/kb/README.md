@@ -3,7 +3,7 @@
 > The structured knowledge layer that grounds every agent response in verified, domain-specific content.
 
 ```
-24 domains | 289 files | 42,500+ lines | MCP-validated 2026-03-26
+25 domains | 372 files | 49,900+ lines | MCP-validated per domain in `_index.yaml` (latest 2026-10-17)
 ```
 
 ---
@@ -66,44 +66,45 @@ Some domains extend this with additional directories:
 
 | Domain | Files | Description | Used By |
 |--------|------:|-------------|---------|
-| dbt | 12 | Fusion Engine, Mesh, Semantic Layer, models, macros, tests | dbt-specialist, code-reviewer, sql-optimizer, test-generator, data-quality-analyst, pipeline-architect |
-| spark | 11 | PySpark, Spark SQL, DataFrames, Real-Time Mode, Spark Connect | spark-engineer, spark-specialist, spark-streaming-architect, spark-troubleshooter, spark-performance-analyzer, lakehouse-architect, lakeflow-architect |
-| airflow | 10 | Airflow 3.x TaskFlow, Dagster, Prefect comparison, DAG design | airflow-specialist, pipeline-architect |
-| sql-patterns | 9 | Cross-dialect SQL: window functions, CTEs, deduplication | code-reviewer, sql-optimizer, spark-engineer, spark-specialist, spark-troubleshooter, streaming-engineer, airflow-specialist, schema-designer |
-| streaming | 10 | Flink, Kafka, Spark Streaming, RisingWave, Materialize, CDC | streaming-engineer, spark-streaming-architect, ai-data-engineer |
-| data-modeling | 10 | Dimensional modeling, Data Vault, SCD types, schema evolution | schema-designer, data-platform-engineer, medallion-architect, supabase-specialist, data-contracts-engineer, data-quality-analyst, sql-optimizer |
-| data-quality | 10 | Soda, Great Expectations, dbt tests, ODCS, Monte Carlo | code-reviewer, data-quality-analyst, data-contracts-engineer, test-generator, ai-data-engineer, ai-data-engineer-cloud, ai-data-engineer-gcp, gcp-data-architect, aws-data-architect, medallion-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist, pipeline-architect |
+| dbt | 13 | dbt v2 (Fusion engine) and Core 1.12, dbt-databricks, Mesh, Semantic Layer, models, macros, data tests | code-reviewer, data-quality-analyst, dbt-specialist, pipeline-architect, sql-optimizer, test-generator |
+| spark | 16 | DataFrames, ANSI mode, Spark Connect, AQE/Photon tuning, liquid clustering, transformWithState | lakeflow-architect, lakeflow-specialist, lakehouse-architect, spark-engineer, spark-performance-analyzer, spark-specialist, spark-streaming-architect, spark-troubleshooter, streaming-engineer |
+| airflow | 11 | Airflow 3.3 Task SDK, assets, Deadline Alerts, Dagster/Prefect comparison, DAG design | airflow-specialist, pipeline-architect |
+| sql-patterns | 9 | Window functions, CTEs, recursive CTEs, deduplication, QUALIFY, DuckDB/Snowflake/BigQuery/Databricks SQL | airflow-specialist, code-reviewer, dbt-specialist, schema-designer, spark-engineer, spark-specialist, spark-troubleshooter, sql-optimizer, streaming-engineer |
+| streaming | 12 | Kafka 4.x (KRaft), Flink 2.x, Spark Structured Streaming, Debezium 3.x, Flink CDC, RisingWave, Materialize | ai-data-engineer, spark-engineer, spark-streaming-architect, streaming-engineer |
+| data-modeling | 10 | Dimensional modeling, Data Vault, SCD types, schema evolution, metric views | data-contracts-engineer, data-platform-engineer, data-quality-analyst, lakehouse-architect, medallion-architect, schema-designer, sql-optimizer, supabase-specialist |
+| data-quality | 14 | Databricks-native quality (SDP expectations, UC constraints, Data Quality Monitoring), GX Core 1.x, Soda Core 4, pandera, ODCS 3.x + datacontract-cli | ai-data-engineer, ai-data-engineer-cloud, ai-data-engineer-gcp, airflow-specialist, aws-data-architect, code-reviewer, data-contracts-engineer, data-quality-analyst, dbt-specialist, gcp-data-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist, medallion-architect, pipeline-architect, schema-designer, test-generator |
 
 ### Infrastructure and Platforms
 
 | Domain | Files | Description | Used By |
 |--------|------:|-------------|---------|
-| lakehouse | 10 | Iceberg v3, Delta Lake 4.1, DuckLake, Unity, Gravitino | lakehouse-architect, data-platform-engineer, lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist, spark-streaming-architect, spark-performance-analyzer |
-| medallion | 10 | Bronze/Silver/Gold layer design, quality progression | medallion-architect, lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder |
-| cloud-platforms | 10 | Snowflake Cortex, Databricks LakeFlow, BigQuery AI | data-platform-engineer, ai-data-engineer-cloud, ai-data-engineer-gcp, gcp-data-architect, spark-specialist, spark-performance-analyzer |
-| aws | 20 | Lambda, S3, Glue, SAM deployment, IAM, Layers | aws-deployer, aws-lambda-architect, aws-data-architect, lambda-builder, ci-cd-specialist, ai-data-engineer-cloud |
-| gcp | 13 | Cloud Run, Pub/Sub, GCS, BigQuery, IAM, Secret Manager | ai-data-engineer-gcp, ai-prompt-specialist-gcp, gcp-data-architect, ai-data-engineer-cloud |
-| microsoft-fabric | 53 | Lakehouse, Warehouse, Pipelines, KQL, CI/CD, AI, Security | fabric-architect, fabric-pipeline-developer, fabric-logging-specialist, fabric-cicd-specialist, fabric-security-specialist, fabric-ai-specialist |
-| lakeflow | 23 | DLT pipelines, materialized views, streaming tables, DABs | lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist, ci-cd-specialist |
-| terraform | 14 | Resources, modules, providers, state, GCP/AWS patterns | aws-deployer, aws-lambda-architect, aws-data-architect, ai-data-engineer-cloud, ai-data-engineer-gcp, gcp-data-architect, ci-cd-specialist |
+| lakehouse | 12 | Iceberg v3, Delta 4.4, DuckLake 1.0, Unity Catalog/Polaris/Gravitino/Nessie, liquid clustering, UC managed Iceberg | data-platform-engineer, lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist, lakehouse-architect, medallion-architect, spark-performance-analyzer, spark-streaming-architect |
+| medallion | 11 | Bronze/Silver/Gold layer design, data quality progression, schema evolution | lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, medallion-architect |
+| cloud-platforms | 10 | Snowflake Cortex, Databricks Lakeflow, BigQuery AI, cross-platform | ai-data-engineer-cloud, ai-data-engineer-gcp, data-platform-engineer, gcp-data-architect, spark-performance-analyzer, spark-specialist |
+| aws | 23 | Lambda, S3, Glue, SAM deployment, IAM, Layers | ai-data-engineer-cloud, aws-data-architect, aws-deployer, aws-lambda-architect, ci-cd-specialist, lambda-builder |
+| gcp | 14 | Cloud Run, Pub/Sub, GCS, BigQuery, IAM, Secret Manager | ai-data-engineer-cloud, ai-data-engineer-gcp, ai-prompt-specialist-gcp, gcp-data-architect |
+| microsoft-fabric | 54 | Lakehouse, Warehouse, Pipelines, KQL, CI/CD, AI, Security | fabric-ai-specialist, fabric-architect, fabric-cicd-specialist, fabric-logging-specialist, fabric-pipeline-developer, fabric-security-specialist |
+| lakeflow | 32 | Spark Declarative Pipelines (ex-DLT), Lakeflow Jobs, Lakeflow Connect, Declarative Automation Bundles | ci-cd-specialist, lakeflow-architect, lakeflow-expert, lakeflow-pipeline-builder, lakeflow-specialist |
+| metric-views | 15 | YAML spec 1.1, MEASURE() queries, joins, window measures, materialization, replace semantics, governed KPIs | schema-designer |
+| terraform | 15 | Resources, modules, providers, state, GCP/AWS patterns | ai-data-engineer-cloud, ai-data-engineer-gcp, aws-data-architect, aws-deployer, aws-lambda-architect, ci-cd-specialist, gcp-data-architect |
 | supabase | 9 | pgvector, RLS, Edge Functions, Auth, Realtime, migrations | supabase-specialist |
 
 ### AI and Modern
 
 | Domain | Files | Description | Used By |
 |--------|------:|-------------|---------|
-| genai | 11 | Multi-agent systems, RAG, state machines, tool calling, guardrails | genai-architect, ai-prompt-specialist, llm-specialist, ai-prompt-specialist-gcp, qdrant-specialist |
-| prompt-engineering | 11 | Chain-of-thought, structured extraction, few-shot, system prompts | ai-prompt-specialist, llm-specialist, ai-prompt-specialist-gcp, genai-architect |
-| ai-data-engineering | 12 | RAG pipelines, vector DBs, feature stores, LLMOps, embeddings | ai-data-engineer, supabase-specialist, qdrant-specialist, genai-architect |
-| modern-stack | 10 | DuckDB, Polars, SQLMesh, Malloy, local-first analytics | (general use) |
+| genai | 14 | Multi-agent systems, RAG, tool calling/MCP, guardrails, Claude API surface, Databricks agent platform | ai-prompt-specialist, ai-prompt-specialist-gcp, genai-architect, llm-specialist, qdrant-specialist |
+| prompt-engineering | 12 | Structured outputs, adaptive thinking/effort, extraction, few-shot, system prompts, provider-specific guidance | ai-prompt-specialist, ai-prompt-specialist-gcp, genai-architect, llm-specialist |
+| ai-data-engineering | 16 | RAG pipelines, vector DBs, Databricks AI Search and Genie Agents, feature stores, LLMOps, embeddings | ai-data-engineer, genai-architect, qdrant-specialist, supabase-specialist |
+| modern-stack | 10 | DuckDB 1.5, DuckLake, Polars 2, SQLMesh, dbt v2, Malloy, Evidence.dev, local-first analytics | (general use) |
 
 ### Development Foundations
 
 | Domain | Files | Description | Used By |
 |--------|------:|-------------|---------|
-| python | 10 | Dataclasses, type hints, generators, context managers | python-developer, code-cleaner, code-documenter |
-| pydantic | 10 | BaseModel, validators, LLM output validation, extraction schemas | python-developer, ai-prompt-specialist, llm-specialist, ai-prompt-specialist-gcp |
-| testing | 10 | pytest, fixtures, mocking, parametrize, Spark testing | python-developer, test-generator |
+| python | 13 | Runtime targets, dataclasses, type hints, generators, error handling, uv/ruff tooling | code-cleaner, code-documenter, code-reviewer, lambda-builder, prompt-crafter, python-developer, test-generator |
+| pydantic | 12 | BaseModel, StringConstraints, validators, strict mode/config, LLM output validation | ai-prompt-specialist, ai-prompt-specialist-gcp, code-reviewer, llm-specialist, python-developer |
+| testing | 13 | pytest 9, pytest-asyncio 1.x, fixtures, mocking, Hypothesis, PySpark testing on Spark 4 (ANSI) | code-reviewer, lambda-builder, python-developer, test-generator |
 | shared | 2 | Cross-domain resources: anti-patterns (referenced by every agent via `anti_pattern_refs`) + the component model (agents/skills/commands/KB layering) | (all agents; authoring skills) |
 
 ---
@@ -124,7 +125,7 @@ Each agent declares a `kb_domains` field in its frontmatter that determines whic
 | lakehouse-architect | lakehouse, spark, data-modeling |
 | medallion-architect | medallion, data-modeling, lakehouse, data-quality |
 | pipeline-architect | airflow, data-quality, dbt |
-| schema-designer | data-modeling, sql-patterns, data-quality |
+| schema-designer | data-modeling, sql-patterns, data-quality, metric-views |
 | the-planner | (none -- strategic planning) |
 
 **Cloud agents** (10 agents in `.claude/agents/cloud/`):
@@ -140,7 +141,7 @@ Each agent declares a `kb_domains` field in its frontmatter that determines whic
 | ci-cd-specialist | terraform, aws, lakeflow |
 | gcp-data-architect | gcp, terraform, cloud-platforms, data-quality |
 | lambda-builder | aws, python, testing |
-| supabase-specialist | ai-data-engineering, data-modeling |
+| supabase-specialist | supabase, ai-data-engineering, data-modeling |
 
 **Platform agents** (6 agents in `.claude/agents/platform/`):
 
@@ -180,7 +181,7 @@ Each agent declares a `kb_domains` field in its frontmatter that determines whic
 | ai-prompt-specialist | prompt-engineering, pydantic, genai |
 | code-cleaner | python |
 | code-documenter | python |
-| code-reviewer | data-quality, sql-patterns, dbt |
+| code-reviewer | python, testing, pydantic, data-quality, sql-patterns, dbt |
 | llm-specialist | prompt-engineering, pydantic, genai |
 | python-developer | python, pydantic, testing |
 
@@ -190,7 +191,7 @@ Each agent declares a `kb_domains` field in its frontmatter that determines whic
 |-------|------------|
 | data-contracts-engineer | data-quality, data-modeling |
 | data-quality-analyst | data-quality, dbt, data-modeling |
-| test-generator | data-quality, dbt, testing |
+| test-generator | testing, python, data-quality, dbt |
 
 **Dev and Workflow agents** (10 agents) do not use KB domains directly.
 

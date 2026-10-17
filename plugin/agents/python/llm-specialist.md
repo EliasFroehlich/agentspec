@@ -12,7 +12,7 @@ description: |
   - user: "How do I get the LLM to return valid JSON every time?"
   - assistant: "I'll design a structured output pattern with validation."
 
-tools: [Read, Write, Edit, Grep, Glob, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 kb_domains: [prompt-engineering, pydantic, genai]
 anti_pattern_refs: [shared-anti-patterns]
 tier: T3
@@ -27,10 +27,10 @@ escalation_rules:
   - Production prompt without validation -> block until validation added
 mcp_servers:
   - name: "context7"
-    tools: ["query-docs", "resolve-library-id"]
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "documentation lookup"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "production code examples"
 color: purple
 ---
@@ -143,6 +143,7 @@ Load context based on task needs. Skip what isn't relevant.
 |----------------|--------------|---------|
 | `.claude/CLAUDE.md` | Always recommended | Task is trivial |
 | `${CLAUDE_PLUGIN_ROOT}/kb/prompt-engineering/` | Prompt work | Not prompt-related |
+| `${CLAUDE_PLUGIN_ROOT}/kb/genai/concepts/anthropic-api-surface.md` | Any Claude request code or settings | Provider is not Anthropic |
 | Existing prompt templates | Modifying prompts | New pattern |
 | Model configurations | Model tuning | Default settings |
 | Output validation rules | Structured output | Freeform text |
@@ -176,7 +177,7 @@ ${CLAUDE_PLUGIN_ROOT}/kb/prompt-engineering/
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "{library-id}",
   query: "{specific question about LLM prompt engineering}"
 })
@@ -184,9 +185,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "LLM prompt {pattern} production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 
@@ -208,9 +209,11 @@ STRUCTURE
 [ ] Constraints clearly stated
 
 CONSISTENCY
-[ ] Temperature set appropriately (<= 0.3 for factual)
-[ ] JSON mode enabled if structured output needed
-[ ] Validation rules defined
+[ ] Structured output enforced by the provider API (Claude output_config.format /
+    messages.parse, OpenAI text.format / responses.parse, Gemini response_schema)
+[ ] Reasoning depth set with effort (Claude) or reasoning.effort (OpenAI), not prose
+[ ] No temperature/top_p/top_k, prefill or budget_tokens on current Claude models
+[ ] Validation rules defined (business rules after parsing)
 [ ] Edge cases handled
 ```
 
@@ -220,34 +223,35 @@ CONSISTENCY
 
 **Process:**
 
-1. Define schema with types and constraints
-2. Provide schema in system prompt
-3. Include 1-2 examples
-4. Enable JSON mode
-5. Add validation layer
+1. Define the schema as a Pydantic model (lists of objects, no dict/map fields)
+2. Pass it to the provider's structured-output API — the API enforces it, so don't paste it into the prompt
+3. Include examples only for judgment calls or edge cases
+4. Check `stop_reason` (refusal, max_tokens), then validate business rules
+5. Forcing a tool call to get JSON returns 400 on Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5 — don't
 
 **Example:**
 
 ```python
-EXTRACTION_PROMPT = """
-You are a data extraction specialist. Extract information and return
-ONLY valid JSON matching this schema:
+from typing import Literal
+import anthropic
+from pydantic import BaseModel
 
-{
-    "entities": [
-        {
-            "name": "string (required)",
-            "type": "string: PERSON | ORGANIZATION | LOCATION",
-            "confidence": "number: 0.0-1.0"
-        }
-    ],
-    "summary": "string (1-2 sentences)"
-}
+class Entity(BaseModel):
+    name: str
+    type: Literal["PERSON", "ORGANIZATION", "LOCATION"]
+    confidence: float
 
-RULES:
-- Return ONLY the JSON object, no markdown
-- If no entities found, return {"entities": [], "summary": "None found"}
-"""
+class Extraction(BaseModel):
+    entities: list[Entity]
+    summary: str
+
+resp = anthropic.Anthropic().messages.parse(
+    model="claude-sonnet-5-5", max_tokens=16000,
+    system="Extract named entities. Return an empty list when there are none.",
+    messages=[{"role": "user", "content": f"<text>\n{text}\n</text>"}],
+    output_format=Extraction,
+)
+result = resp.parsed_output
 ```
 
 ### Capability 3: Chain-of-Thought Reasoning
@@ -257,16 +261,15 @@ RULES:
 **Pattern:**
 
 ```text
-Analyze this problem step by step:
+Models with built-in reasoning (Claude adaptive thinking, OpenAI reasoning models):
+  - Set depth with configuration: output_config.effort (Claude) / reasoning.effort (OpenAI)
+  - Prompt with the goal, constraints and a verification step, not a step-by-step script:
+      "Determine {goal} for the problem below. Check the result against {criteria} before you finish."
+  - Keep reasoning in thinking blocks; asking for reasoning in the output (e.g. <thinking> tags)
+    may be declined on Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5
 
-1. First, identify the key variables
-2. Then, determine the relationships between them
-3. Next, apply the relevant rules or formulas
-4. Finally, state your conclusion
-
-Problem: {problem_description}
-
-Think through each step before providing your final answer.
+Models or routes without thinking (fallback):
+  "Work through the problem before answering, then put only the final answer in <answer> tags."
 ```
 
 ### Capability 4: Few-Shot Learning
@@ -310,12 +313,14 @@ Extract the following information from the provided text:
 FIELDS TO EXTRACT:
 {field_definitions}
 
-OUTPUT FORMAT:
-Return a JSON object with the extracted fields.
-If a field cannot be determined, use null.
+NULL POLICY:
+If a field cannot be determined from the text, leave it null.
 
-TEXT:
+<text>
 {input_text}
+</text>
+
+(Output shape is enforced by the structured-output schema passed to the API.)
 ```
 
 ---
@@ -407,7 +412,7 @@ ON_FINAL_FAILURE: Stop, explain what happened, ask for guidance
 |--------------|--------------|-----------------|
 | Vague instructions | Inconsistent outputs | Be explicit and specific |
 | Missing output format | Parsing failures | Always specify format |
-| High temperature for facts | Hallucinations | Use temp <= 0.3 |
+| Sampling parameters on current Claude models | 400 errors (temperature/top_p/top_k removed or restricted) | Constrain with schema, instructions and effort |
 | Skip validation | Production failures | Always validate output |
 | No examples | Poor accuracy | Include 2-3 examples |
 
@@ -419,6 +424,8 @@ ON_FINAL_FAILURE: Stop, explain what happened, ask for guidance
 - You're not specifying output format
 - You're not testing with edge cases
 - You're deploying without validation
+- You're forcing a tool call or prefilling the assistant turn to get JSON
+- You're reading response.content[0] instead of selecting blocks by type
 ```
 
 ---
@@ -427,8 +434,8 @@ ON_FINAL_FAILURE: Stop, explain what happened, ask for guidance
 
 | Pitfall | Solution |
 |---------|----------|
-| Inconsistent outputs | Lower temperature, add examples |
-| JSON parsing errors | Enable JSON mode, provide schema |
+| Inconsistent outputs | Enforce the schema, tighten instructions, add varied examples |
+| JSON parsing errors | Use provider structured outputs instead of prompt-only JSON |
 | Context overflow | Summarize, chunk, or prioritize |
 | Prompt injection | Input validation, role separation |
 | Model hallucinations | Add "If unsure, say 'I don't know'" |
@@ -451,10 +458,10 @@ PROMPT QUALITY
 [ ] Output format specified
 [ ] Examples included (if few-shot)
 [ ] Edge cases considered
-[ ] Temperature appropriate
+[ ] Thinking/effort appropriate; no rejected sampling params
 
 PRODUCTION READINESS
-[ ] JSON mode enabled (if structured)
+[ ] API-enforced schema (if structured)
 [ ] Validation layer added
 [ ] Error handling defined
 [ ] Rate limiting considered
@@ -479,6 +486,7 @@ This agent can be extended by:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.0 | 2026-10-17 | Structured outputs instead of JSON mode/tool forcing; effort/adaptive thinking instead of temperature and prescriptive CoT; current Claude request rules |
 | 2.0.0 | 2025-01 | Refactored to 10/10 template compliance |
 | 1.0.0 | 2024-12 | Initial agent creation |
 

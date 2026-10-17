@@ -1,22 +1,40 @@
-schema_version: "1.0"
+schema_version: "1.1"
 domain: testing
 file_type: pytest-configuration
-last_validated: "2026-02-17"
-source: "pytest official documentation + community best practices"
+last_validated: "2026-10-17"
+source: >
+  https://docs.pytest.org/en/stable/reference/reference.html,
+  https://docs.pytest.org/en/stable/changelog.html,
+  https://pytest-asyncio.readthedocs.io/en/latest/reference/configuration.html,
+  https://docs.astral.sh/uv/concepts/projects/dependencies/,
+  https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
 
 # ============================================================
-# pyproject.toml [tool.pytest.ini_options] configuration spec
+# Version targets
+# ============================================================
+
+versions:
+  pytest:
+    current: "9.1.1"            # 2026-06-19; 9.0 dropped Python 3.9
+    minversion: "9.0"           # native TOML, strict, subtests
+    databricks_runtime_17_3_lts: "8.3.5"   # preinstalled; use the ini_options form or %pip install pytest>=9
+  pytest_asyncio:
+    current: "1.4.0"            # 2026-05-26; event_loop fixture removed in 1.0.0
+  hypothesis:
+    current: "6.170.1"          # 2026-10-16
+
+# ============================================================
+# pyproject.toml configuration spec (pytest 9 native table [tool.pytest])
 # ============================================================
 
 pytest_config:
   description: "Standard pytest configuration for Python projects"
+  table: "[tool.pytest]"        # pytest 9+; [tool.pytest.ini_options] still works but not both at once
 
-  # --- Core Settings ---
   testpaths:
     type: list
     default: ["tests"]
     description: "Directories to search for tests"
-    example: ["tests", "src/tests"]
 
   python_files:
     type: list
@@ -26,30 +44,33 @@ pytest_config:
   python_classes:
     type: list
     default: ["Test*"]
-    description: "Class name patterns for test discovery"
 
   python_functions:
     type: list
     default: ["test_*"]
-    description: "Function name patterns for test discovery"
 
-  # --- Output Settings ---
   addopts:
-    type: string
-    default: "-v --tb=short --strict-markers"
+    type: list                  # real TOML list in [tool.pytest]; a string in ini_options
+    default: ["-ra"]
     description: "Default CLI options appended to every pytest invocation"
-    recommended: "-v --tb=short --strict-markers -x"
+
+  strict:
+    type: bool
+    default: true
+    since: "9.0"
+    description: >
+      Enables strict_config, strict_markers, strict_parametrization_ids and strict_xfail.
+      Future strictness options are enabled too, so pair it with a pinned pytest version.
+    pytest_8_equivalent: 'addopts = "--strict-markers --strict-config"'
 
   console_output_style:
     type: string
     default: "progress"
     options: ["progress", "classic", "count"]
-    description: "Output style for test progress"
 
-  # --- Marker Registry ---
   markers:
     type: list
-    description: "Custom markers (register to avoid warnings)"
+    description: "Custom markers (must be registered when strict markers are on)"
     values:
       - name: "unit"
         description: "Unit tests (fast, isolated)"
@@ -62,38 +83,49 @@ pytest_config:
       - name: "e2e"
         description: "End-to-end tests"
 
-  # --- Filtering ---
   filterwarnings:
     type: list
     default:
       - "error"
-      - "ignore::DeprecationWarning"
-      - "ignore::PendingDeprecationWarning"
-    description: "Warning filters applied during test runs"
+    description: >
+      Turn warnings into errors. Do NOT add a blanket "ignore::DeprecationWarning": it hides
+      exactly the deprecations that break upgrades (pytest-asyncio fixtures, pydantic Field
+      extra kwargs, datetime.utcnow). Ignore specific third-party modules instead, e.g.
+      "ignore::DeprecationWarning:some_vendor_lib.*".
 
-  # --- Minimum Version ---
   minversion:
     type: string
-    default: "7.0"
-    description: "Minimum required pytest version"
+    default: "9.0"
+
+  asyncio:                       # pytest-asyncio 1.x options (same table); with strict = true these keys
+                                 # fail with "Unknown config option" unless pytest-asyncio is installed
+    asyncio_mode: "strict"       # default; "auto" handles every async test/fixture
+    asyncio_default_fixture_loop_scope: "function"   # unset = fixture scope (default may change)
+    asyncio_default_test_loop_scope: "function"      # unset = function
 
 # ============================================================
-# pyproject.toml example
+# pyproject.toml example (pytest 9)
 # ============================================================
 #
-# [tool.pytest.ini_options]
+# [tool.pytest]
+# minversion = "9.0"
 # testpaths = ["tests"]
-# addopts = "-v --tb=short --strict-markers"
+# addopts = ["-ra"]
+# strict = true
+# filterwarnings = ["error"]
+# asyncio_default_fixture_loop_scope = "function"
 # markers = [
 #     "unit: Unit tests (fast, isolated)",
 #     "integration: Integration tests (external services)",
 #     "slow: Slow tests (> 5 seconds)",
 #     "spark: Tests requiring SparkSession",
 # ]
-# filterwarnings = [
-#     "error",
-#     "ignore::DeprecationWarning",
-# ]
+#
+# pytest 8.x (e.g. Databricks Runtime 17.3 LTS) -- use the INI-compatibility table instead:
+# [tool.pytest.ini_options]
+# testpaths = ["tests"]
+# addopts = "-ra --strict-markers --strict-config"
+# markers = ["slow: Slow tests (> 5 seconds)"]
 
 # ============================================================
 # conftest.py hierarchy
@@ -102,10 +134,13 @@ pytest_config:
 conftest_hierarchy:
   description: "Recommended conftest.py placement"
   structure:
-    root: "tests/conftest.py -- shared fixtures, markers, hooks"
+    root: "tests/conftest.py -- shared fixtures (spark session), markers, pytest_addoption"
     unit: "tests/unit/conftest.py -- unit-specific fixtures"
-    integration: "tests/integration/conftest.py -- DB, API fixtures"
-    spark: "tests/spark/conftest.py -- SparkSession fixture"
+    integration: "tests/integration/conftest.py -- DB, API fixtures (no pytest_addoption here)"
+    spark: "tests/spark/conftest.py -- Spark data factories"
+  rules:
+    - "pytest_addoption is only called for initial conftests: define CLI flags in tests/conftest.py"
+    - "In Databricks notebooks run pytest with sys.dont_write_bytecode = True and -p no:cacheprovider"
 
 # ============================================================
 # Coverage configuration
@@ -128,22 +163,31 @@ coverage_config:
       - "if TYPE_CHECKING:"
 
 # ============================================================
-# Plugin recommendations
+# Plugin recommendations (install into a PEP 735 dependency group)
 # ============================================================
 
 recommended_plugins:
   - name: "pytest-cov"
     purpose: "Coverage reporting"
-    install: "pip install pytest-cov"
+    install: "uv add --group test pytest-cov"
   - name: "pytest-xdist"
-    purpose: "Parallel test execution"
-    install: "pip install pytest-xdist"
+    purpose: "Parallel test execution (-n auto)"
+    install: "uv add --group test pytest-xdist"
   - name: "pytest-mock"
-    purpose: "Simplified mocking"
-    install: "pip install pytest-mock"
+    purpose: "mocker fixture; patches undone automatically"
+    install: "uv add --group test pytest-mock"
+  - name: "pytest-asyncio"
+    purpose: "Async tests and fixtures (1.x API)"
+    install: "uv add --group test pytest-asyncio"
+  - name: "hypothesis"
+    purpose: "Property-based testing"
+    install: "uv add --group test hypothesis"
   - name: "pytest-timeout"
-    purpose: "Test timeouts"
-    install: "pip install pytest-timeout"
+    purpose: "Test timeouts (--timeout=60)"
+    install: "uv add --group test pytest-timeout"
   - name: "pytest-randomly"
     purpose: "Randomize test order"
-    install: "pip install pytest-randomly"
+    install: "uv add --group test pytest-randomly"
+  - name: "pip fallback"
+    purpose: "Projects without uv / Databricks notebooks"
+    install: "%pip install pytest-cov  (notebook) or pip install pytest-cov"

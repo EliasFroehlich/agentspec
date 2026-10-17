@@ -1,584 +1,153 @@
-# Materialized Views Optimization in Lakeflow
+# Materialized Views in Lakeflow Pipelines
 
-> Source: https://docs.databricks.com/aws/en/dlt/materialized-views
+> **Purpose**: How materialized views (MVs) refresh, what is incrementalizable, refresh policies, layout, access from outside the pipeline, standalone MVs
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Overview
+---
 
-Materialized views are cached query results that automatically track and incrementally process changes in upstream data, providing fast query performance with correct results.
+## 1. What an MV is
 
-## Key Characteristics
-
-### What are Materialized Views?
-
-**Materialized views are:**
-- Cached query results that refresh at specified intervals
-- Automatically track changes in upstream data
-- Incrementally updated to maintain sync with source data
-- Stored in Unity Catalog with metadata about the query
-
-**Benefits:**
-- ⚡ Faster query performance vs standard views
-- ✅ Always provide correct results (even with late/out-of-order data)
-- 💰 Minimize update costs through incremental processing
-- 🔄 Automatic refresh on pipeline updates
-
-## How They Work
-
-### Storage and Metadata
+A materialized view is a pipeline object made of a defining query, a flow that updates it, and cached
+results stored as a Unity Catalog table. It is always correct as of its last update (late and
+out-of-order data included) and Databricks tries to update it incrementally. MVs are defined and
+updated by one pipeline; other pipelines cannot change them. You query them like any table.
 
 ```python
-@dlt.table(
-    comment="Regional sales materialized view",
-    table_properties={
-        "quality": "gold",
-        "refresh_strategy": "incremental"
-    }
-)
-def regional_sales():
-    partners_df = spark.read.table("partners")
-    sales_df = spark.read.table("sales")
-
-    return (
-        partners_df
-        .join(sales_df, on="partner_id", how="inner")
-        .groupBy("region", "product_category")
-        .agg(
-            F.sum("amount").alias("total_sales"),
-            F.count("*").alias("transaction_count")
-        )
-    )
-```
-
-**What happens:**
-1. Query definition stored in Unity Catalog
-2. Results materialized in cloud storage (Delta tables)
-3. Metadata tracks source dependencies
-4. Refresh logic determines incremental updates
-
-### Incremental Update Process
-
-**Databricks attempts to process only the data that must be processed:**
-
-```
-Initial state:
-partners: 1000 rows
-sales: 10000 rows
-→ Materialized view: Full computation
-
-Update:
-partners: +10 new rows
-sales: +100 new rows
-→ Materialized view: Process only affected rows (~110 rows)
-```
-
-**Not all operations support incremental refresh:**
-- ✅ Filters, projections
-- ✅ Joins (with keys)
-- ✅ Aggregations (with group by)
-- ❌ Window functions (full recomputation)
-- ❌ Non-deterministic functions
-- ❌ Some complex nested queries
-
-## Complete Example: Sales Analytics
-
-```python
-import dlt
+from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-# Source tables (streaming or batch)
-@dlt.table()
-def customers():
-    return spark.read.table("raw.customers")
-
-@dlt.table()
-def orders():
-    return spark.read.table("raw.orders")
-
-@dlt.table()
-def order_items():
-    return spark.read.table("raw.order_items")
-
-@dlt.table()
-def products():
-    return spark.read.table("raw.products")
-
-# Materialized view: Customer order summary
-@dlt.table(
-    comment="Customer purchase summary with incremental refresh",
-    table_properties={
-        "quality": "gold",
-        "department": "sales"
-    }
+@dp.materialized_view(
+    comment="Revenue by region and category",
+    cluster_by_auto=True,
+    refresh_policy="auto",
 )
-def customer_order_summary():
-    return (
-        dlt.read("customers").alias("c")
-        .join(dlt.read("orders").alias("o"), "customer_id")
-        .join(dlt.read("order_items").alias("oi"), "order_id")
-        .join(dlt.read("products").alias("p"), "product_id")
-        .groupBy("c.customer_id", "c.customer_name", "c.region")
-        .agg(
-            F.count("o.order_id").alias("total_orders"),
-            F.sum("oi.quantity * oi.unit_price").alias("total_revenue"),
-            F.avg("oi.quantity * oi.unit_price").alias("avg_order_value"),
-            F.countDistinct("p.product_id").alias("unique_products"),
-            F.max("o.order_date").alias("last_order_date")
-        )
-    )
-
-# Materialized view: Product performance
-@dlt.table(
-    comment="Product sales performance metrics"
-)
-def product_performance():
-    return (
-        dlt.read("order_items").alias("oi")
-        .join(dlt.read("products").alias("p"), "product_id")
-        .join(dlt.read("orders").alias("o"), "order_id")
-        .groupBy("p.product_id", "p.product_name", "p.category")
-        .agg(
-            F.sum("oi.quantity").alias("total_units_sold"),
-            F.sum("oi.quantity * oi.unit_price").alias("total_revenue"),
-            F.countDistinct("o.customer_id").alias("unique_customers"),
-            F.avg("oi.unit_price").alias("avg_selling_price")
-        )
-    )
-
-# Materialized view: Daily sales trends
-@dlt.table(
-    comment="Daily aggregated sales trends"
-)
-def daily_sales_trends():
-    return (
-        dlt.read("orders").alias("o")
-        .join(dlt.read("order_items").alias("oi"), "order_id")
-        .groupBy(F.date_trunc("day", "o.order_date").alias("sale_date"))
-        .agg(
-            F.count("o.order_id").alias("order_count"),
-            F.sum("oi.quantity * oi.unit_price").alias("daily_revenue"),
-            F.countDistinct("o.customer_id").alias("active_customers")
-        )
-        .orderBy("sale_date")
-    )
+def regional_sales():
+    partners = spark.read.table("main.ref.partners")
+    sales = spark.read.table("main.sales.orders")
+    return (partners.join(sales, "partner_id")
+            .groupBy("region", "category")
+            .agg(F.sum("amount").alias("total_sales"),     # amount DECIMAL(18,2)
+                 F.count("*").alias("orders")))
 ```
-
-## SQL Syntax
 
 ```sql
--- Simple materialized view
-CREATE OR REFRESH MATERIALIZED VIEW customer_summary AS
-SELECT
-    customer_id,
-    COUNT(*) as order_count,
-    SUM(total_amount) as total_spent
-FROM orders
-GROUP BY customer_id
-
--- With joins
-CREATE OR REFRESH MATERIALIZED VIEW regional_performance AS
-SELECT
-    r.region_name,
-    r.country,
-    COUNT(DISTINCT o.order_id) as order_count,
-    SUM(o.total_amount) as total_revenue
-FROM regions r
-INNER JOIN orders o ON r.region_id = o.region_id
-GROUP BY r.region_name, r.country
-
--- Time-based aggregation
-CREATE OR REFRESH MATERIALIZED VIEW monthly_metrics AS
-SELECT
-    DATE_TRUNC('month', order_date) as month,
-    product_category,
-    SUM(amount) as total_sales,
-    COUNT(*) as transaction_count,
-    AVG(amount) as avg_transaction
-FROM sales
-GROUP BY DATE_TRUNC('month', order_date), product_category
+CREATE OR REFRESH MATERIALIZED VIEW regional_sales
+CLUSTER BY AUTO
+REFRESH POLICY AUTO
+AS SELECT region, category, SUM(amount) AS total_sales, COUNT(*) AS orders
+FROM main.ref.partners JOIN main.sales.orders USING (partner_id)
+GROUP BY region, category;
 ```
 
-## Incremental Refresh Optimization
+## 2. Refresh semantics
 
-### What Triggers Full Recomputation?
+| Fact | Detail |
+|------|--------|
+| Incremental refresh needs serverless | MVs in classic-compute pipelines are always fully recomputed |
+| Default refresh | Cost model picks incremental or full; results identical either way |
+| Full refresh | Clears table and checkpoints and reprocesses available source data (removed source records stay lost) |
+| Standalone MVs | Refreshes run on a serverless pipeline automatically |
+| Check what happened | Tables panel "Incrementalization" column; event log technique `FULL_RECOMPUTE`, `NO_OP`, `ROW_BASED`, `PARTITION_OVERWRITE`, `WINDOW_FUNCTION`, `APPEND_ONLY`, `GROUP_AGGREGATE`, `GENERIC_AGGREGATE` |
+| Test a query | `EXPLAIN CREATE MATERIALIZED VIEW ...` |
 
-**Full refresh required when:**
-- ❌ Schema changes in source tables
-- ❌ View definition changes
-- ❌ Certain aggregation types (window functions)
-- ❌ Non-deterministic expressions
-- ❌ First pipeline run
+### Refresh policy
 
-**Incremental refresh possible when:**
-- ✅ Simple inserts to source tables
-- ✅ Updates with proper keys
-- ✅ Filters and projections
-- ✅ Deterministic aggregations
-- ✅ Standard joins
+| Policy (Python `refresh_policy` / SQL `REFRESH POLICY`) | Behavior |
+|----------------------------------------------------------|----------|
+| `auto` / `AUTO` (default) | Cost-based choice |
+| `incremental` / `INCREMENTAL` | Incremental when possible, else full |
+| `incremental_strict` / `INCREMENTAL STRICT` | Fail the refresh if it cannot be incremental |
+| `full` / `FULL` | Always full |
 
-### Optimizing for Incremental Updates
+There is no `refresh_strategy` table property; use the policy above.
 
-```python
-# ✅ GOOD: Supports incremental refresh
-@dlt.table()
-def optimized_aggregation():
-    return (
-        dlt.read("events")
-        .filter(F.col("event_date") >= "2024-01-01")
-        .groupBy("user_id", "event_type")
-        .agg(F.count("*").alias("event_count"))
-    )
+## 3. What refreshes incrementally
 
-# ❌ AVOID: Requires full recomputation
-@dlt.table()
-def requires_full_refresh():
-    return (
-        dlt.read("events")
-        .withColumn(
-            "rank",
-            F.row_number().over(
-                Window.partitionBy("user_id")
-                .orderBy(F.desc("event_time"))
-            )
-        )
-        .filter(F.col("rank") == 1)
-    )
+| Construct | Incremental? |
+|-----------|--------------|
+| `SELECT` with deterministic built-ins and immutable UDFs | Yes (needs row tracking on sources) |
+| `GROUP BY`, `WITH` (CTE) | Yes |
+| `WITH RECURSIVE` | No (full recompute) |
+| `UNION ALL` | Yes (row tracking) |
+| `WHERE`, `HAVING` | Yes (row tracking) |
+| `INNER`, `LEFT`, `RIGHT`, `FULL OUTER JOIN` | Yes (row tracking) |
+| Window functions (`OVER`) | Yes, when `PARTITION BY` is specified |
+| `QUALIFY` | Yes |
+| Expectations | Yes, except when reading a view that has expectations, or with a `DROP` expectation plus `NOT NULL` columns |
+| `current_date()`, `current_timestamp()`, `now()` | Only inside `WHERE` |
+| Other non-deterministic functions | No |
+| `SUM`/`AVG` over `FLOAT`/`DOUBLE` | May force full; cast to `DECIMAL` |
+| Sources | Delta tables, MVs, STs (incl. AUTO CDC targets), UC managed Iceberg v2/v3. Not: volumes, external locations, foreign catalogs (foreign Iceberg readable but not incremental) |
+
+Two-sided date filters (`>= :start AND < :end`) force a full refresh on each update; one-sided
+(`>= :start`) stays incremental.
+
+Recommended source table properties:
+
+```sql
+ALTER TABLE main.sales.orders SET TBLPROPERTIES (
+  delta.enableDeletionVectors = true,
+  delta.enableRowTracking = true,
+  delta.enableChangeDataFeed = true);
 ```
 
-### Partition Pruning
+Declaring primary/foreign keys with `RELY` lets the optimizer simplify MV plans (not enforced).
 
-```python
-# Enable partition pruning for better incremental performance
-@dlt.table(
-    partition_cols=["event_date"]
-)
-def partitioned_aggregation():
-    return (
-        dlt.read("events")
-        .groupBy("event_date", "category")
-        .agg(F.sum("amount").alias("total"))
-    )
-```
+## 4. Layout and maintenance
 
-## Performance Considerations
+- Use `cluster_by` / `cluster_by_auto` (SQL `CLUSTER BY` / `CLUSTER BY AUTO`). Databricks recommends
+  liquid clustering instead of Z-order (`pipelines.autoOptimize.zOrderCols`).
+- `pipelines.autoOptimize.managed` defaults to `true`; tables under predictive optimization ignore it.
+- Do not set both partition and clustering columns (error).
 
-### Small Cardinality Aggregations
+## 5. Running refreshes
 
-**Pattern:** Compute incrementally, overwrite completely
+| How | Command |
+|-----|---------|
+| Normal update | `databricks bundle run <pipeline>` or a job `pipeline_task` |
+| Full refresh of selected tables | `databricks bundle run <pipeline> --full-refresh mv_a,mv_b` |
+| Full refresh of everything | `--full-refresh-all` (or `pipeline_task.full_refresh: true`) |
+| Standalone MV (Databricks SQL) | `REFRESH MATERIALIZED VIEW mv_name FULL` |
+| Block accidental full refresh | Table property `pipelines.reset.allowed = false` |
 
-```python
-@dlt.table()
-def campaign_summary():
-    """
-    Small number of campaigns (~100s)
-    Incremental computation, full overwrite
-    """
-    return (
-        dlt.read("events")
-        .groupBy("campaign_id")
-        .agg(
-            F.count("email").alias("num_messages"),
-            F.countDistinct("user_id").alias("unique_users")
-        )
-    )
-```
+## 6. Access and governance
 
-**Characteristics:**
-- Few distinct groups
-- Fast full computation
-- Simple refresh strategy
+- Consumers in Databricks (SQL warehouses, standard access mode DBR 13.3 LTS+, jobs, other
+  pipelines) read MVs with `SELECT` grants. What is not allowed is using an MV as a **streaming
+  source** outside its pipeline.
+- Non-Databricks engines: external data access (DBR 17.3+, `pipelines.externalMetadata.enabled =
+  true`, clients on Delta 4.0+ or Iceberg v3, `EXTERNAL USE SCHEMA` + `SELECT`) or compatibility
+  mode (Public Preview).
+- No `CLONE`, no time travel; the Catalog Explorer History tab does not show MV history.
+- A non-admin needs `REFRESH` on the MV plus pipeline permissions to view the backing pipeline.
+- UDF behavior changes that Databricks cannot detect (for example an upgraded library) require a
+  manual full refresh.
 
-### Large Cardinality Aggregations
+## 7. Standalone MVs
 
-**Pattern:** Compute incrementally, update selectively
+Outside a pipeline: `CREATE MATERIALIZED VIEW` in Databricks SQL, or `@dp.materialized_view` in a
+serverless notebook (Beta; no `private`, no schedule, re-run with `full_refresh=True` for full).
+Databricks creates a managed pipeline of type `MV/ST`. Standalone MVs accept `CONSTRAINT ...
+EXPECT` (Jun 2026).
 
-```python
-@dlt.table()
-def user_activity():
-    """
-    Millions of users
-    Incremental computation and updates
-    """
-    return (
-        dlt.read("events")
-        .groupBy("user_id")
-        .agg(
-            F.count("*").alias("event_count"),
-            F.sum("value").alias("total_value"),
-            F.max("event_time").alias("last_activity")
-        )
-    )
-```
+## 8. When not to use an MV
 
-**Characteristics:**
-- Many distinct groups
-- Expensive full computation
-- Selective row updates
+- Sources that do not retain history (Kafka) or ingest operations (Auto Loader): use streaming tables.
+- Very large inputs where a full recompute is unaffordable: prefer streaming tables (exactly-once).
+- Millisecond latency: MVs update in seconds to minutes.
 
-### Time Window Aggregations
+## Sources
 
-**Pattern:** Aggregate incrementally, append when window closes
-
-```python
-@dlt.table()
-def hourly_metrics():
-    """
-    Time-based windows
-    Append completed windows
-    """
-    return (
-        dlt.read("events")
-        .groupBy(F.window("timestamp", "1 hour").alias("time"))
-        .agg(
-            F.count("email").alias("num_messages"),
-            F.sum("value").alias("total_value")
-        )
-    )
-```
-
-**Characteristics:**
-- Fixed time windows
-- Append-only for closed windows
-- Update only current window
-
-## Best Practices
-
-### ✅ DO
-
-1. **Design for incremental refresh**
-   ```python
-   # Use simple aggregations
-   .groupBy("key").agg(F.sum("value"))
-
-   # Avoid window functions when possible
-   # Use partitioning instead
-   ```
-
-2. **Partition large views**
-   ```python
-   @dlt.table(partition_cols=["date", "region"])
-   def partitioned_view():
-       return (
-           dlt.read("source")
-           .groupBy("date", "region", "category")
-           .agg(F.sum("amount"))
-       )
-   ```
-
-3. **Use appropriate data types**
-   ```python
-   # Efficient aggregations
-   .agg(
-       F.sum("amount").cast("decimal(18,2)"),
-       F.count("*").cast("bigint")
-   )
-   ```
-
-4. **Monitor refresh performance**
-   - Track refresh duration
-   - Check incremental vs full refreshes
-   - Monitor data volume processed
-
-5. **Cache intermediate results**
-   ```python
-   # For complex multi-step transformations
-   @dlt.view()
-   def intermediate_result():
-       return expensive_transformation()
-
-   @dlt.table()
-   def final_view():
-       return dlt.read("intermediate_result").aggregate()
-   ```
-
-### ❌ DON'T
-
-1. **Don't use non-deterministic functions**
-   ```python
-   # ❌ BAD: Requires full refresh
-   .withColumn("random_val", F.rand())
-   .withColumn("current_ts", F.current_timestamp())
-
-   # ✅ GOOD: Deterministic
-   .withColumn("created_date", F.to_date("created_at"))
-   ```
-
-2. **Don't overuse window functions**
-   ```python
-   # ❌ AVOID: Expensive, full recomputation
-   .withColumn("rank", F.row_number().over(...))
-
-   # ✅ ALTERNATIVE: Use aggregation
-   .groupBy("key").agg(F.max("value"))
-   ```
-
-3. **Don't create overly complex views**
-   ```python
-   # ❌ BAD: Too complex for incremental
-   multiple_self_joins().with_many_window_functions()
-
-   # ✅ GOOD: Break into stages
-   @dlt.view()
-   def stage1():
-       return simple_transformation()
-
-   @dlt.table()
-   def stage2():
-       return dlt.read("stage1").aggregate()
-   ```
-
-## Monitoring and Troubleshooting
-
-### Check Refresh Mode
-
-```python
-# View pipeline metrics to see if refresh was incremental
-# Look for:
-# - "Incremental refresh"  vs  "Full refresh"
-# - Rows processed
-# - Duration
-```
-
-### Metrics to Monitor
-
-| Metric | What to Track | Alert Threshold |
-|--------|--------------|-----------------|
-| **Refresh duration** | Time to update view | > 10 minutes |
-| **Rows processed** | Data volume per refresh | Unexpected spikes |
-| **Refresh mode** | Incremental vs full | Unexpected full refreshes |
-| **View size** | Storage consumed | Rapid growth |
-| **Query performance** | Read latency | > 5 seconds |
-
-### Force Full Refresh
-
-```python
-# When schema changes or definition updates
-# Pipeline automatically detects and does full refresh
-
-# To manually trigger:
-# 1. Stop pipeline
-# 2. Drop view
-# 3. Restart pipeline
-```
-
-## Advanced Patterns
-
-### Multi-Layer Materialization
-
-```python
-# Layer 1: Base aggregations
-@dlt.table()
-def daily_user_metrics():
-    return (
-        dlt.read("events")
-        .groupBy("date", "user_id")
-        .agg(F.count("*").alias("daily_events"))
-    )
-
-# Layer 2: Weekly rollup (uses Layer 1)
-@dlt.table()
-def weekly_user_metrics():
-    return (
-        dlt.read("daily_user_metrics")
-        .withColumn("week", F.date_trunc("week", "date"))
-        .groupBy("week", "user_id")
-        .agg(F.sum("daily_events").alias("weekly_events"))
-    )
-
-# Layer 3: Monthly rollup (uses Layer 2)
-@dlt.table()
-def monthly_user_metrics():
-    return (
-        dlt.read("weekly_user_metrics")
-        .withColumn("month", F.date_trunc("month", "week"))
-        .groupBy("month", "user_id")
-        .agg(F.sum("weekly_events").alias("monthly_events"))
-    )
-```
-
-### Conditional Materialization
-
-```python
-# Only materialize for specific conditions
-@dlt.table()
-def high_value_customers():
-    """Only customers with >$10K lifetime value"""
-    return (
-        dlt.read("customer_order_summary")
-        .filter(F.col("total_revenue") >= 10000)
-    )
-
-@dlt.table()
-def recent_activity():
-    """Only last 90 days of activity"""
-    return (
-        dlt.read("user_activity")
-        .filter(
-            F.col("last_activity") >= F.current_date() - F.expr("INTERVAL 90 DAYS")
-        )
-    )
-```
-
-## Limitations
-
-### Cannot Be Used Outside Pipeline
-
-**Materialized views can only be queried within the pipeline that created them.**
-
-**Workaround:**
-```python
-# Create a streaming table that reads from the materialized view
-@dlt.table()
-def exportable_summary():
-    """Can be queried from outside pipeline"""
-    return spark.read.table("materialized_view_name")
-```
-
-### Some Operations Require Full Refresh
-
-- Window functions
-- Non-deterministic expressions
-- Complex self-joins
-- Certain nested subqueries
-
-### Latency Considerations
-
-**Not designed for:**
-- ❌ Millisecond-level latency
-- ❌ Real-time dashboards
-- ❌ Instant query results
-
-**Good for:**
-- ✅ Scheduled batch updates
-- ✅ Daily/hourly refreshes
-- ✅ Analytical workloads
-
-## Comparison: Materialized Views vs Streaming Tables
-
-| Feature | Materialized View | Streaming Table |
-|---------|------------------|-----------------|
-| **Refresh mode** | Batch (triggered) | Continuous/Triggered |
-| **Incremental processing** | Automatic (when possible) | Always |
-| **Latency** | Minutes to hours | Seconds to minutes |
-| **Use case** | Aggregations, reports | Real-time processing |
-| **External access** | No | Yes |
-| **State management** | Automatic | Manual (watermarks) |
-| **Cost** | Lower (batch) | Higher (continuous) |
-
-## Summary
-
-Materialized views in Lakeflow provide:
-- ⚡ **Fast query performance** through caching
-- 💰 **Cost efficiency** via incremental updates
-- ✅ **Correctness guarantees** even with late data
-- 🔄 **Automatic refresh** on pipeline updates
-
-**Best for:**
-- Aggregation queries
-- Join-heavy analytics
-- Scheduled reports
-- Data marts and summaries
-
-**Avoid for:**
-- Real-time dashboards
-- External tool access (use streaming tables)
-- Complex window operations (unless necessary)
+- https://docs.databricks.com/aws/en/ldp/concepts/materialized-views
+- https://docs.databricks.com/aws/en/ldp/incremental-refresh
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-materialized-view
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-create-materialized-view
+- https://docs.databricks.com/aws/en/ldp/properties
+- https://docs.databricks.com/aws/en/ldp/parameters
+- https://docs.databricks.com/aws/en/ldp/unity-catalog
+- https://docs.databricks.com/aws/en/ldp/external-access
+- https://docs.databricks.com/aws/en/external-access/external-for-pipelines
+- https://docs.databricks.com/aws/en/ldp/limitations
+- https://docs.databricks.com/aws/en/dev-tools/cli/bundle-commands
+- https://docs.databricks.com/aws/en/release-notes/dlt/2026

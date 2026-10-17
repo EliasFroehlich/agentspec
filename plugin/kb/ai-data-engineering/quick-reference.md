@@ -1,77 +1,85 @@
 # AI Data Engineering Quick Reference
 
 > Fast lookup tables. For code examples, see linked files.
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17 — versions and models as of 2026-10-17.
 
-## Vector DB Comparison (2026)
+## Vector Store Comparison
 
-| Feature | pgvector | Qdrant | Pinecone | Weaviate | Milvus | LanceDB | Chroma |
-|---------|----------|--------|----------|----------|--------|---------|--------|
-| Type | Extension | Standalone | Managed | Standalone | Standalone | Embedded | Embedded |
-| Language | SQL | Rust | API-only | Go | Go/C++ | Rust | Python |
-| Hybrid search | BM25 (pg_search) | Built-in sparse | Sparse-dense | Native BM25 | Built-in | Built-in | No |
-| Metadata filter | SQL WHERE | Payload filter | Filter API | GraphQL | Expression | SQL | Where dict |
-| Max scale | ~10M vectors | Billions | Billions | Billions | Billions | Billions | Millions |
-| Multi-tenancy | Row-level security | Built-in | Namespaces | Built-in | Partitions | Tables | Collections |
-| Best for | Postgres teams | Complex RAG | Zero-ops | Hybrid search | Billion-scale | Embedded/local | Prototyping |
-| Cost | Free (self-host) | Free (OSS) | Pay-per-use | Free (OSS) | Free (OSS) | Free (OSS) | Free (OSS) |
+| Feature | pgvector 0.8.7 | Qdrant 1.19 | Databricks AI Search | Pinecone | Weaviate | Milvus |
+|---------|----------------|-------------|----------------------|----------|----------|--------|
+| Type | Postgres extension | Standalone (Rust) | Managed, UC-governed | Managed | Standalone | Standalone |
+| Hybrid search | Postgres full-text + RRF in app | Sparse + dense prefetch, RRF/DBSF | `HYBRID` (BM25 + ANN), `FULL_TEXT` (Beta) | Sparse-dense | Native BM25 | Built-in |
+| Filtering | SQL `WHERE` + iterative scans | Payload filters + indexes | Filters (dict or SQL-like by endpoint) | Filter API | Filters | Expressions |
+| Compression | `halfvec`, binary quantization | TurboQuant, scalar, binary | Managed | Managed | PQ | Several |
+| Best for | Postgres-centric apps | Complex filtering, self-hosting | Lakehouse data, Delta Sync | Zero-ops | Hybrid search | Billion-scale |
 
-## Feature Store Comparison (2026)
+Chroma and LanceDB are embedded options for local development and prototypes.
 
-| Feature | Feast | Tecton | Hopsworks | Databricks FS | SageMaker FS |
-|---------|-------|--------|-----------|--------------|-------------|
-| License | OSS (Apache 2.0) | Commercial | OSS + Enterprise | Databricks-only | AWS-only |
-| Online serving | Redis, DynamoDB | Managed (<5ms) | RonDB (<5ms) | Databricks | DynamoDB |
-| Offline store | Any (Parquet, BQ) | Managed | Hudi/Delta | Delta Lake | S3/Parquet |
-| Streaming features | Basic (push) | Full | Full | Full | Full |
-| Vector features | No (external) | No | Yes (native) | Yes | No |
-| Best for | OSS, flexible | Enterprise | Feature platform | Databricks shops | AWS shops |
+## Feature Store Comparison
 
-## Embedding Model Selection (March 2026)
+| Feature | Feast 0.67 | Databricks Feature Store (UC) | Tecton | Hopsworks | SageMaker FS |
+|---------|------------|-------------------------------|--------|-----------|--------------|
+| License | OSS (Apache 2.0) | Databricks | Commercial | OSS + Enterprise | AWS |
+| Authoring | Python definitions | Feature tables (GA) or Feature Views (declarative) | Declarative | Platform | API |
+| Online serving | Redis, DynamoDB, others | Online Feature Store (Lakebase) | Managed | RonDB | DynamoDB |
+| Vector features | Alpha (Milvus, pgvector, Qdrant, …) | Use AI Search | — | Native | — |
 
-| Model | Provider | Dimensions | Context | Matryoshka | MTEB Score | Cost/1M tokens |
-|-------|----------|-----------|---------|------------|-----------|---------------|
-| Gemini Embedding 001 | Google | 3072 | 8K | Yes | 68.3 | ~$0.004/1K chars |
-| text-embedding-3-large | OpenAI | 3072 (truncatable) | 8191 | Yes | 64.6 | $0.13 |
-| embed-v4 | Cohere | 1024 | 512 | No | 65.2 | $0.10 |
-| Voyage 3 Large | Voyage AI | 1024 | 32K | No | 67.2 | $0.18 |
-| text-embedding-3-small | OpenAI | 1536 (truncatable) | 8191 | Yes | 62.3 | $0.02 |
-| Nomic embed-text-v1.5 | Nomic (OSS) | 768 | 8192 | Yes | 60.1 | Free (self-host) |
-| BGE-M3 | BAAI (OSS) | 1024 | 8192 | No | 63.0 | Free (self-host) |
-| Gemini Embedding 2 Preview | Google | 3072 | 8K | Yes | TBD | ~$0.004/1K chars |
+## Embedding Models (as of 2026-10-17)
+
+| Model | Provider | Dims | Context | Notes |
+|-------|----------|------|---------|-------|
+| `voyage-4-large` / `voyage-4` / `voyage-4-lite` | Voyage AI | 1024 (256–2048) | 32K | `voyage-4-nano` open-weight |
+| `embed-v5.0-pro` / `-fast` | Cohere | 256–2048 | 128K | Text + images + PDFs |
+| `gemini-embedding-2` | Google | 3072 (MRL; 768/1536 recommended) | 8,192 | Multimodal; `google-genai` SDK |
+| `text-embedding-3-large` / `-small` | OpenAI | `dimensions` param | 8,192 | Still current |
+| `databricks-qwen3-embedding-0-6b` | Databricks FMAPI | ≤ 1024 | ~32K | Public Preview |
+| BGE-M3, Nomic embed | Open source | 1024 / 768 | 8K | Self-hosted |
 
 ## RAG Pipeline Checklist
 
-| Step | Component | Key Decision |
-|------|-----------|-------------|
-| 1. Load | Document loader | PDF, HTML, Markdown parser |
-| 2. Chunk | Splitter | Recursive (default), semantic, or late chunking |
-| 3. Embed | Embedding model | Gemini/OpenAI (API) vs BGE/Nomic (self-host) |
-| 4. Store | Vector DB | pgvector (Postgres) vs Qdrant (standalone) vs managed |
-| 5. Retrieve | Search strategy | Hybrid (dense + BM25) with RRF fusion |
-| 6. Rerank | Cross-encoder | Cohere Rerank v3.5, cross-encoder, ColBERT |
-| 7. Generate | LLM | Claude Sonnet 4.6, GPT-4o, or Gemini 2.5 |
-| 8. Evaluate | Metrics | RAGAS (faithfulness, relevancy, precision) |
+| Step | Component | Key decision |
+|------|-----------|--------------|
+| 1. Load / parse | Loaders or `ai_parse_document` | Layout-aware parsing for PDFs and tables |
+| 2. Chunk | `langchain-text-splitters` or `ai_prep_search` | Recursive default; context-enriched chunks |
+| 3. Embed | Embedding model | Pin model + dimensions; managed embeddings on AI Search |
+| 4. Store | Vector store | pgvector / Qdrant / AI Search |
+| 5. Retrieve | Hybrid (dense + keyword) | Fusion (RRF) or platform hybrid |
+| 6. Rerank | `rerank-v4.0-pro` / `-fast` (Cohere), `rerank-2.5` (Voyage) | Retrieve 20–50, keep 3–5 |
+| 7. Generate | `claude-sonnet-5-5`, `gpt-6.1-sol`, `gemini-3.8-flash` | Cite sources; structured output when needed |
+| 8. Evaluate | MLflow 3 scorers, RAGAS 0.4 | Groundedness, relevance, context recall |
 
-## LLMOps Observability Tools (2026)
+## LLMOps and Observability
 
-| Tool | Type | Strength | Cost |
-|------|------|----------|------|
-| Langfuse | OSS | Tracing, prompt management, evals, best free tier | Free / self-host |
-| Braintrust | Commercial | Best eval pipeline, experiments, datasets | $249/mo+ |
-| LangSmith | Commercial | LangChain native, zero-config tracing | Paid |
-| Arize Phoenix | OSS | Visual traces, embeddings, LLM evals | Free / self-host |
-| Helicone | Commercial | Proxy integration, no code changes | Freemium |
-| Datadog LLM | Commercial | Unified infra + LLM monitoring | Enterprise |
+| Tool | Type | Strength |
+|------|------|----------|
+| MLflow 3 | OSS / Databricks managed | Tracing (OTel), `mlflow.genai.evaluate`, Prompt Registry, monitoring |
+| Langfuse 5.x | OSS / cloud | OTel-based tracing, prompts, scores |
+| LangSmith | Commercial | LangChain/LangGraph native |
+| Arize Phoenix | OSS | Traces, embeddings, evals |
+| Unity Gateway | Databricks | Usage, budgets, rate limits, PII masking for models/MCP |
+
+## Databricks Text-to-SQL
+
+| Need | Use |
+|------|-----|
+| NL questions over UC tables / metric views | Genie Agent + Conversation API (`w.genie.start_conversation`) |
+| From an external agent | Genie One MCP server |
+| Outside Databricks | Guarded pipeline in `patterns/text-to-sql.md` |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| Single embedding model for all content | Match model to content type and language |
-| No chunk overlap | 10-20% overlap for context preservation |
-| Skip metadata in vector store | Store source, page, section, timestamp with vectors |
-| Stale embeddings | Re-embed on source updates, track embedding version |
-| No eval pipeline | Measure faithfulness, relevancy, precision with RAGAS |
-| Skip observability | Instrument with Langfuse/Braintrust from day one |
-| Use Chroma in production | Use pgvector, Qdrant, or Pinecone for production scale |
+| Mix embedding models or dimensions in one index | One index per model+dimension; record both per vector |
+| Count Claude tokens with tiktoken | `client.messages.count_tokens` |
+| Import `langchain.text_splitter` / `langchain.chains` (1.x) | `langchain_text_splitters`; `create_agent` or `langchain_classic` |
+| Use the deprecated `google.generativeai` SDK | `from google import genai` (`google-genai`) |
+| Write new Qdrant code against `search` / `/points/search` | Query API: `query_points` / `/points/query` (v1.10+) |
+| Rebuild text-to-SQL over Unity Catalog | Curate a Genie Agent |
+| Skip evaluation | Fixed dataset + MLflow/RAGAS from day one |
+
+## Sources
+
+- https://github.com/pgvector/pgvector · https://qdrant.tech/documentation/search/search/ · https://docs.databricks.com/aws/en/ai-search/ai-search/
+- https://docs.feast.dev/reference/alpha-vector-database · https://docs.databricks.com/aws/en/machine-learning/feature-store/
+- https://docs.voyageai.com/docs/embeddings · https://docs.cohere.com/docs/cohere-embed · https://ai.google.dev/gemini-api/docs/embeddings · https://docs.cohere.com/docs/rerank

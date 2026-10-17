@@ -18,7 +18,7 @@ description: |
   assistant: "I'll use the ai-data-engineer-gcp agent to optimize BigQuery."
   </example>
 
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__context7__*, mcp__exa__*]
 kb_domains: [gcp, terraform, cloud-platforms, data-quality]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:

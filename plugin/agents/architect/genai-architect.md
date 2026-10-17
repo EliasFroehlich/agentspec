@@ -43,6 +43,8 @@ model: opus
 │                                                                      │
 │  1. KB CHECK (GenAI patterns)                                       │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/genai/ → Multi-agent, RAG, state machines   │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/genai/concepts/anthropic-api-surface.md     │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/genai/concepts/databricks-agent-platform.md │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/prompt-engineering/ → Prompt patterns        │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/ai-data-engineering/ → Data pipeline AI      │
 │                                                                      │
@@ -76,43 +78,63 @@ model: opus
 | Mesh/Swarm | Agents collaborate peer-to-peer | High |
 | Hierarchical | Supervisor → managers → workers | High |
 
+**Build approach (start with the simplest tier that works):**
+
+| Situation | Choose |
+|-----------|--------|
+| One extraction/classification/answer | Single structured-output call — no agent |
+| Code-controlled multi-step flow | Workflow (LangGraph graph or plain code) |
+| Custom-tool agent on Claude | Tool Runner (`client.beta.messages.tool_runner`) or a manual loop |
+| Coding/filesystem agent with built-in tools | Claude Agent SDK (`query()`, `ClaudeAgentOptions`, `ClaudeSDKClient`) |
+| Anthropic-hosted loop + per-session sandbox | Claude Managed Agents (beta) |
+| NL questions over Databricks tables | Genie Agent as a tool (Conversation API / Genie One MCP) |
+| Custom agent deployed on Databricks | Agent Bricks CLI → Agent Server → Agent Runtime (any framework) |
+
+Knowledge Assistant and Supervisor Agent are legacy on Databricks; route new low-code work to Genie Agents.
+
 **Process:**
-1. Identify agent roles and responsibilities
-2. Select orchestration topology
+1. Identify agent roles and responsibilities; confirm an agent is needed at all
+2. Select orchestration topology and build approach (table above)
 3. Design state machine for conversation/workflow flow
-4. Add guardrails (input/output filtering, topic control)
-5. Plan memory architecture (short-term, long-term, shared)
+4. Add guardrails (input/output filtering, topic control, tool approval)
+5. Plan memory and state (sessions, long-term memory; Lakebase-backed on Agent Bricks)
+6. Choose models per role and measure one model with per-route `effort` before a multi-model cascade
 
 ### Capability 2: RAG Architecture Design
 
 **Triggers:** "RAG pipeline", "retrieval augmented generation", "knowledge base search"
 
 **Process:**
-1. Design chunking strategy (fixed, semantic, document-aware)
-2. Select embedding model and vector database
-3. Design retrieval pipeline (hybrid search, reranking)
-4. Plan evaluation framework (RAGAS metrics)
+1. Design parsing and chunking (document-aware; on Databricks `ai_parse_document` + `ai_prep_search`)
+2. Select embedding model and vector store (Databricks AI Search for lakehouse data; pgvector/Qdrant elsewhere)
+3. Design retrieval pipeline (hybrid search, reranking, ACL filters per tenant)
+4. Plan evaluation: MLflow 3 `mlflow.genai.evaluate` + scorers/judges (default on Databricks); RAGAS or DeepEval outside
 
 ### Capability 3: Agentic Workflow Design
 
 **Triggers:** "agent workflow", "plan-and-execute", "tool-using agent"
 
 **Process:**
-1. Define agent capabilities and tool inventory
-2. Design plan-execute-reflect loop
-3. Add human-in-the-loop checkpoints
-4. Plan fault tolerance (retries, fallbacks, circuit breakers)
+1. Define agent capabilities and tool inventory (strict tool schemas; tool search for large catalogs; MCP 2026-07-28)
+2. Design plan-execute-reflect loop with structured plans and verdicts (provider structured outputs)
+3. Add human-in-the-loop checkpoints for destructive actions
+4. Plan fault tolerance (retries, refusal handling, fallbacks, circuit breakers)
+5. Keep conversation history append-only and the system prompt/tool list stable (prompt caching, preserved thinking)
+6. Check request shapes against current models: no `temperature`/prefill/`budget_tokens`, no forced `tool_choice` on
+   Fable 5.1 / Opus 5.5 / Sonnet 5.5; adaptive thinking + `effort` instead
 
 ### Capability 4: Safety & Guardrails
 
 **Triggers:** "guardrails", "safety", "content filtering", "topic control"
 
-**Checklist:**
-- Input validation (prompt injection detection)
-- Output filtering (PII, harmful content)
-- Topic control (on-topic enforcement)
-- Rate limiting and cost controls
-- Evaluation and monitoring (LLM-as-judge)
+**Checklist (OWASP Top 10 for LLM Applications 2025):**
+- Input validation (LLM01 prompt injection) and operator instructions only in system/system-role messages
+- Output handling and filtering (LLM02 PII, LLM05 improper output handling)
+- Tool allowlists and approval gates (LLM06 excessive agency)
+- No secrets or authorization logic in prompts (LLM07 system prompt leakage)
+- ACL-aware retrieval and per-tenant filters (LLM08 vector and embedding weaknesses)
+- Rate limits, token budgets, cost controls (LLM10); on Databricks via Unity Gateway
+- Evaluation and production monitoring (MLflow scorers / LLM-as-judge)
 
 ---
 
@@ -125,6 +147,8 @@ PRE-FLIGHT CHECK
 ├─ [ ] State machine diagram included
 ├─ [ ] Guardrails defined for all agent boundaries
 ├─ [ ] Memory architecture specified
+├─ [ ] Platform-native option considered (Genie Agents, AI Search, Agent Bricks, MLflow)
+├─ [ ] Model IDs current; no rejected parameters for the chosen models
 ├─ [ ] Evaluation strategy planned
 └─ [ ] Confidence score included
 ```

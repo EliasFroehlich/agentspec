@@ -1,7 +1,7 @@
 # Error Handling
 
 > **Purpose**: Handle Pydantic ValidationError gracefully in LLM extraction pipelines
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -13,21 +13,20 @@
 ## Implementation
 
 ```python
-import json
 import logging
-from typing import Optional, TypeVar
+from collections.abc import Callable
+
 from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T", bound=BaseModel)
 
 
 class ExtractionResult(BaseModel):
     """Wrapper for extraction results with error metadata."""
     success: bool
-    data: Optional[dict] = None
-    errors: Optional[list[dict]] = None
-    error_summary: Optional[str] = None
+    data: dict | None = None
+    errors: list[dict] | None = None
+    error_summary: str | None = None
     attempts: int = 1
 
 
@@ -35,7 +34,7 @@ def parse_validation_errors(error: ValidationError) -> list[dict]:
     """Convert ValidationError to structured error list."""
     return [
         {
-            "field": " -> ".join(str(loc) for loc in err["loc"]),
+            "field": " -> ".join(str(loc) for loc in err["loc"]) or "root",
             "message": err["msg"],
             "type": err["type"],
             "input": err.get("input"),
@@ -46,6 +45,8 @@ def parse_validation_errors(error: ValidationError) -> list[dict]:
 
 def format_error_for_retry(error: ValidationError) -> str:
     """Format validation errors as LLM retry instructions."""
+    if any(err["type"] == "json_invalid" for err in error.errors()):
+        return "Your previous response was not valid JSON. Return ONLY a JSON object."
     lines = ["The previous response had validation errors. Fix these issues:"]
     for err in error.errors():
         field_path = " -> ".join(str(loc) for loc in err["loc"])
@@ -54,8 +55,8 @@ def format_error_for_retry(error: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def validate_with_retry(
-    call_llm_fn,
+def validate_with_retry[T: BaseModel](   # PEP 695 bound type parameter (Python 3.12+)
+    call_llm_fn: Callable[[str, float], str],
     prompt: str,
     model_class: type[T],
     max_retries: int = 2,
@@ -63,73 +64,36 @@ def validate_with_retry(
 ) -> ExtractionResult:
     """Validate LLM output with automatic retry on failure.
 
-    Args:
-        call_llm_fn: Callable that takes (prompt, temperature) and returns str.
-        prompt: Initial extraction prompt.
-        model_class: Pydantic model to validate against.
-        max_retries: Maximum retry attempts after first failure.
-        temperature: LLM temperature setting.
-
-    Returns:
-        ExtractionResult with success status and data or errors.
+    model_validate_json raises ValidationError for both schema violations and
+    malformed JSON (error type "json_invalid"), so one except clause covers both.
     """
     current_prompt = prompt
-
-    for attempt in range(1, max_retries + 2):
+    attempts = max_retries + 1
+    for attempt in range(1, attempts + 1):
+        raw_response = call_llm_fn(current_prompt, temperature)
         try:
-            raw_response = call_llm_fn(current_prompt, temperature)
-            cleaned = _extract_json(raw_response)
-            result = model_class.model_validate_json(cleaned)
-
-            logger.info("Validation succeeded on attempt %d", attempt)
-            return ExtractionResult(
-                success=True,
-                data=result.model_dump(),
-                attempts=attempt,
-            )
-
+            result = model_class.model_validate_json(_extract_json(raw_response))
         except ValidationError as e:
-            error_details = parse_validation_errors(e)
-            logger.warning(
-                "Attempt %d/%d failed: %d errors",
-                attempt, max_retries + 1, e.error_count(),
-            )
-
-            if attempt <= max_retries:
-                retry_instruction = format_error_for_retry(e)
-                current_prompt = f"{prompt}\n\n{retry_instruction}"
-            else:
+            logger.warning("Attempt %d/%d failed: %d errors", attempt, attempts, e.error_count())
+            if attempt == attempts:
                 return ExtractionResult(
                     success=False,
-                    errors=error_details,
+                    errors=parse_validation_errors(e),
                     error_summary=f"{e.error_count()} validation errors after {attempt} attempts",
                     attempts=attempt,
                 )
-
-        except (ValueError, json.JSONDecodeError) as e:
-            logger.error("JSON parse error on attempt %d: %s", attempt, str(e))
-            if attempt > max_retries:
-                return ExtractionResult(
-                    success=False,
-                    errors=[{"field": "root", "message": str(e), "type": "json_invalid"}],
-                    error_summary=f"Invalid JSON after {attempt} attempts",
-                    attempts=attempt,
-                )
-            current_prompt = (
-                f"{prompt}\n\nYour previous response was not valid JSON. "
-                "Return ONLY a valid JSON object, no markdown or text."
-            )
-
-    # Should not reach here, but safety fallback
-    return ExtractionResult(success=False, error_summary="Unexpected failure")
+            current_prompt = f"{prompt}\n\n{format_error_for_retry(e)}"
+        else:
+            logger.info("Validation succeeded on attempt %d", attempt)
+            return ExtractionResult(success=True, data=result.model_dump(), attempts=attempt)
+    raise AssertionError("unreachable")
 
 
 def _extract_json(text: str) -> str:
     """Strip markdown code fences from LLM response."""
     text = text.strip()
     if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [l for l in lines[1:] if l.strip() != "```"]
+        lines = [line for line in text.split("\n")[1:] if line.strip() != "```"]
         text = "\n".join(lines)
     return text.strip()
 ```
@@ -149,9 +113,9 @@ from pydantic import BaseModel, Field
 
 
 class Receipt(BaseModel):
-    merchant: str = Field(..., min_length=1)
-    total: float = Field(..., gt=0)
-    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    merchant: str = Field(min_length=1)
+    total: float = Field(gt=0)
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 # With retry logic
@@ -177,7 +141,7 @@ else:
 | `missing` | Required field not in JSON | Retry with explicit field list |
 | `string_type` | Wrong type for string field | Retry with type instruction |
 | `greater_than` | Number below minimum | Retry with constraint reminder |
-| `json_invalid` | Not valid JSON at all | Retry asking for JSON only |
+| `json_invalid` | Not valid JSON at all (still a `ValidationError`) | Retry asking for JSON only |
 | `string_pattern_mismatch` | Regex pattern failed | Retry with format example |
 
 ## See Also
@@ -185,3 +149,9 @@ else:
 - [LLM Output Validation](../patterns/llm-output-validation.md)
 - [Validators](../concepts/validators.md)
 - [Custom Validators](../patterns/custom-validators.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/errors/validation_errors/
+- https://docs.pydantic.dev/latest/concepts/models/
+- https://peps.python.org/pep-0695/

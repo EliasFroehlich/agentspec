@@ -1,88 +1,97 @@
 # Streaming Quick Reference
 
-> Fast lookup tables for stream processing (2025+). For code examples, see linked files.
+> **Purpose**: Fast lookup tables for Kafka, Flink, Spark Structured Streaming, Debezium and streaming databases
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
-## Framework Comparison (2025 Versions)
+## Current Versions
 
-| Feature | Flink 2.0 | Spark Streaming 4.0 | RisingWave 2.5 | Kafka Streams | Kafka 4.0 |
-|---------|-----------|---------------------|----------------|---------------|-----------|
-| Latency | ms | seconds (RT: ms) | ms | ms | ms (broker) |
-| Language | Java/SQL | Python/SQL | SQL (Postgres) | Java | N/A (broker) |
-| State mgmt | ForSt (disaggregated) | In-memory/disk | Hummock (S3) | RocksDB | KRaft (metadata) |
-| Exactly-once | Yes | Yes | Yes | Yes | Yes |
-| SQL support | Flink SQL | Spark SQL | Full Postgres | ksqlDB | N/A |
-| ZooKeeper | N/A | N/A | N/A | N/A | Removed (KRaft-only) |
-| Best for | Complex event processing | Unified batch+stream | Streaming SQL apps | Kafka-native | Event backbone |
+| Technology | Current | Notes |
+|-----------|---------|-------|
+| Apache Kafka | 4.3.1 (2026-06-25) | KRaft only since 4.0; 3.9.x was the last ZooKeeper (bridge) release |
+| Apache Flink | 2.3.0 (2026-06-25) | `config.yaml` only; Flink CDC 3.7.0 |
+| Apache Spark | 4.2.0 (2026-07-14) | DBR 17.3 LTS = Spark 4.0.0, DBR 18 LTS = 4.1.0, DBR 19 = 4.2.0 |
+| Debezium | 3.7.0.Final (2026-09-29) | Built against Kafka Connect 4.3.1 |
+| RisingWave | 3.1.0 (2026-09-21) | 3.0.5 patch (2026-10-12) |
+| Materialize | v26.x | Cloud or Self-Managed (license key; free Community tier) |
 
-## Windowing Types
+## Framework Comparison
 
-| Window | Behavior | Use Case |
-|--------|----------|----------|
-| Tumbling | Fixed, non-overlapping | Hourly aggregations |
-| Sliding (Hop) | Fixed, overlapping | Moving averages |
-| Session | Gap-based, dynamic | User session analysis |
-| Global | Single window | All-time aggregations |
+| Feature | Flink 2.3 | Spark Structured Streaming 4.2 | RisingWave 3.1 | Kafka Streams |
+|---------|-----------|--------------------------------|----------------|---------------|
+| Latency | ms | Micro-batch seconds; real-time mode sub-second | Sub-second | ms |
+| Language | Java, SQL, Python | Python, Scala, Java, SQL | SQL (Postgres) | Java |
+| State | HashMap, RocksDB, ForSt | HDFS-backed or RocksDB (RocksDB default on DBR 17.3+) | Hummock on object storage | RocksDB |
+| Exactly-once | Checkpoints + transactional sinks | Checkpoint/WAL + idempotent sinks | Yes (exactly-once sinks in 3.0) | Transactions |
+| Best for | Complex event processing | Lakehouse batch + stream | Streaming SQL apps | Kafka-native services |
 
-## Exactly-Once Comparison
+## Kafka 4.x
 
-| Engine | Mechanism |
-|--------|-----------|
-| Flink | Chandy-Lamport checkpointing |
-| Kafka | Idempotent producer + transactions |
-| Spark | Write-ahead log + idempotent sinks |
-| RisingWave | Internal consistency (no external coordination) |
+| Change | Detail |
+|--------|--------|
+| ZooKeeper | Removed in 4.0; migrate on 3.9 (`zookeeper.metadata.migration.enable`) before upgrading |
+| Controller quorum | Dynamic: `controller.quorum.bootstrap.servers` + `kafka-storage.sh format --standalone` |
+| Consumer protocol | KIP-848 GA in 4.0; clients opt in with `group.protocol=consumer` |
+| Share groups (KIP-932) | Early access 4.0, preview 4.1, **production-ready 4.2**; `share.version=1`; Java `KafkaShareConsumer` |
+| Tiered storage | Production-ready since 3.9 (KIP-405); needs a `RemoteStorageManager` plugin |
+| Java | Brokers/Connect/tools Java 17; clients/Streams Java 11 |
 
-## Kafka 4.0 Migration Quick Reference
+## Flink 2.x
 
-| Change | Before (Kafka 3.x) | After (Kafka 4.0) |
-|--------|--------------------|--------------------|
-| Coordination | ZooKeeper ensemble | KRaft (built-in, mandatory) |
-| Consumer protocol | Classic rebalance | KIP-848 new consumer group protocol (GA) |
-| Partition scaling | Limited by ZK | Faster metadata handling |
-| Deployment | Kafka + ZK clusters | Kafka-only (simpler) |
-| Queue semantics | N/A | Share groups for queue-like consumption |
+| Change | Detail |
+|--------|--------|
+| Config | `execution.checkpointing.dir`, `execution.checkpointing.savepoint-dir`, `execution.checkpointing.incremental` |
+| State backend | `state.backend.type: hashmap \| rocksdb \| forst` (ForSt = disaggregated, experimental) |
+| Removed in 2.0 | DataSet API, Scala API, `SourceFunction`/`SinkFunction`, `flink-conf.yaml` |
+| SQL additions | Materialized tables 1.20; `ML_PREDICT` 2.1; `VECTOR_SEARCH` 2.2; `FROM_CHANGELOG`/`TO_CHANGELOG` 2.3 |
 
-## Flink 2.0 Migration Quick Reference
+## Spark Structured Streaming
 
-| Change | Before (Flink 1.x) | After (Flink 2.0) |
-|--------|--------------------|--------------------|
-| State backend | RocksDB (local disk) | ForSt (disaggregated, remote DFS) |
-| State API | Synchronous state access | Async state API (State V2) |
-| DataSet API | Available | Removed (use DataStream or Table API) |
-| Scala API | Scala DataStream API | Removed (use Java DataStream API) |
-| Source/Sink API | SourceFunction, SinkFunction | Source V2 / Sink V2 only |
-| Table API types | TableSchema, TableColumn | Schema, Column, DataTypes |
-| Materialized Tables | N/A | Native Flink SQL materialized tables |
+| Feature | Apache Spark | Databricks |
+|---------|--------------|------------|
+| `transformWithState` | 4.0+ (row-based Python 4.1+) | DBR 16.2+ |
+| Real-time mode | 4.1 Scala stateless; 4.2 PySpark trigger | DBR 16.4 LTS+, Photon off, `outputMode("update")` |
+| RocksDB changelog checkpointing | `spark.sql.streaming.stateStore.rocksdb.changelogCheckpointing.enabled` | Default on DBR 17.3+ |
+| Continuous trigger | Experimental, legacy | Not supported |
 
-## Debezium 3.x Quick Reference
-
-| Feature | Detail |
-|---------|--------|
-| Kafka compat | Built against Kafka Connect 3.9+, works with Kafka 4.0 |
-| Async engine | Debezium Engine runs asynchronously for higher throughput |
-| K8s Operator | Native Kubernetes operator for cloud-native CDC |
-| Signal channels | Source-based signaling for incremental snapshots |
-| Supported DBs | MySQL, Postgres, MongoDB, Oracle, SQL Server, Vitess, Cassandra |
-
-## RisingWave 2.5 Quick Reference
+## Debezium 3.x
 
 | Feature | Detail |
 |---------|--------|
-| Iceberg native | Auto compaction, snapshot expiration, native Iceberg sink |
-| Backfill control | Fine-grained MV backfill ordering |
-| OpenAI embeddings | `openai_embedding()` function for real-time vectorization |
-| Join isolation | Isolate high-amplification joins from other operators |
-| Window clause | Enhanced SQL WINDOW clause support |
+| Kafka 4.0 | Built and tested from 3.2 (3.1 was built on Kafka Connect 3.9.0) |
+| Engine | Async engine since 2.6; default (old engine removed) since 3.2 |
+| Operator | Since 2.3 (preview); Helm chart `debezium/debezium-operator` |
+| Unwrap SMT | `delete.tombstone.handling.mode` (`drop`, `tombstone`, `rewrite`, ...) |
+| Incremental snapshot | Signal-driven (`signal.data.collection`, `execute-snapshot`) |
+| 3.7 | Debezium CLI, Platform alerting, incubating TiDB/Milvus/SQLite |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| Process-time when event-time needed | Use event-time + watermarks |
-| Unbounded state | Set state TTL, use watermarks |
-| No dead letter queue | Route bad records to DLQ |
-| Skip checkpointing | Enable checkpointing every 1-5 min |
-| Process everything as stream | Use batch for historical backfill |
-| Run Kafka with ZooKeeper (4.0+) | Migrate to KRaft before upgrading to 4.0 |
-| Use Flink DataSet API (2.0+) | Migrate to DataStream API or Table API/SQL |
-| Synchronous state in Flink 2.0 | Use async state API for disaggregated state |
+| Process-time windows when event time exists | Event time + watermarks |
+| Unbounded state | State TTL, watermarks, temporal filters |
+| Local or shared checkpoint paths | One durable path per query (object storage or `/Volumes/...`) |
+| Continuous-processing trigger | `.trigger(realTime="5 minutes")` (Spark 4.2+/DBR 16.4 LTS+) or `processingTime` |
+| Legacy `state.*` checkpoint/savepoint keys in Flink 2.x | `execution.checkpointing.dir` / `.savepoint-dir` / `.incremental` |
+| Old unwrap-SMT delete options | `delete.tombstone.handling.mode` |
+| A "group type" client property for queues | Enable `share.version` and use a share consumer |
+| Session/heartbeat timeouts on a `consumer`-protocol client | Set `group.consumer.*` on the broker/group |
+
+## Related Documentation
+
+| Topic | Path |
+|-------|------|
+| Fundamentals | `concepts/stream-processing-fundamentals.md` |
+| Kafka | `concepts/kafka-fundamentals.md`, `patterns/kafka-producer-consumer.md` |
+| Spark | `patterns/spark-streaming-patterns.md`; APIs: `../spark/patterns/transform-with-state.md`, `../spark/concepts/real-time-mode.md` |
+| CDC | `patterns/cdc-patterns.md`, `patterns/debezium-operations.md`, `patterns/flink-cdc-pipelines.md` |
+| Full Index | `index.md` |
+
+## Sources
+
+- https://kafka.apache.org/community/downloads/ · https://kafka.apache.org/42/getting-started/upgrade/
+- https://flink.apache.org/downloads/ · https://nightlies.apache.org/flink/flink-docs-stable/docs/deployment/config/
+- https://spark.apache.org/news/ · https://docs.databricks.com/aws/en/structured-streaming/real-time/setup
+- https://docs.databricks.com/aws/en/stateful-applications/ · https://docs.databricks.com/aws/en/structured-streaming/rocksdb-state-store
+- https://debezium.io/releases/ · https://docs.risingwave.com/changelog/release-notes · https://materialize.com/docs/self-managed-deployments/

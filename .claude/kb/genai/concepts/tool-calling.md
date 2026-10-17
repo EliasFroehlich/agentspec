@@ -1,153 +1,150 @@
 # Tool Calling
 
-> **Purpose**: LLM function/tool calling protocols, MCP, Agent SDKs, and production integration
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **Purpose**: LLM tool/function calling across providers, the Model Context Protocol (MCP 2026-07-28), and safe argument handling
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Tool calling enables LLMs to invoke external functions by generating structured JSON arguments. The LLM does not execute tools directly -- it produces a tool call request, and the application executes the function and returns results. In 2026, the Model Context Protocol (MCP) has emerged as the universal open standard for tool connectivity, with 12+ framework integrations. Agent SDKs from Anthropic and OpenAI package the full tool-calling loop into production-ready libraries.
+Tool calling lets a model request a function call with structured JSON arguments; your application executes it and returns
+the result. The model never executes anything itself. Each provider uses a slightly different tool schema, so keep one
+provider-neutral registry and export per provider. MCP standardizes tool discovery and invocation across clients; its
+current revision (2026-07-28) is stateless and supports two standard transports, stdio and Streamable HTTP.
 
 ## The Pattern
 
 ```python
 from dataclasses import dataclass
 from typing import Any, Callable
-import json
 
 @dataclass
 class ToolDefinition:
     name: str
-    description: str
-    parameters: dict  # JSON Schema
+    description: str          # 3-4+ sentences: what, when (and when not), each parameter
+    parameters: dict          # JSON Schema with "required" and "additionalProperties": False
     function: Callable
     requires_confirmation: bool = False
 
 class ToolRegistry:
-    """Protocol-agnostic tool registry."""
+    """Provider-neutral registry; export the schema each API expects."""
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
 
-    def register(self, tool: ToolDefinition):
+    def register(self, tool: ToolDefinition) -> None:
         self._tools[tool.name] = tool
 
-    def get_schemas(self) -> list[dict]:
-        """Export tool schemas for LLM (OpenAI format)."""
-        return [{"type": "function", "function": {
-            "name": t.name, "description": t.description,
-            "parameters": t.parameters,
-        }} for t in self._tools.values()]
+    def anthropic_tools(self) -> list[dict]:   # Claude Messages API
+        return [{"name": t.name, "description": t.description,
+                 "input_schema": t.parameters, "strict": True} for t in self._tools.values()]
+
+    def openai_tools(self) -> list[dict]:      # OpenAI Responses API function tools
+        return [{"type": "function", "name": t.name, "description": t.description,
+                 "parameters": t.parameters, "strict": True} for t in self._tools.values()]
 
     def execute(self, name: str, arguments: dict) -> Any:
-        """Execute a tool by name with validated arguments."""
         tool = self._tools.get(name)
-        if not tool:
+        if tool is None:
             raise ValueError(f"Unknown tool: {name}")
         if tool.requires_confirmation:
-            raise ConfirmationRequired(name, arguments)
+            raise PermissionError(f"{name} needs human approval")
         return tool.function(**arguments)
 ```
 
-## Tool Calling Loop
-
-```text
-User Message --> LLM (with tool schemas)
-                   |
-                   +--> Text Response (no tool needed)
-                   +--> Tool Call Request (name + args)
-                          --> App executes function
-                          --> Tool Result returned to LLM
-                          --> LLM generates final response
-```
-
-## MCP (Model Context Protocol) -- The Universal Standard
+## MCP: server and client (Python SDK `mcp` 2.x)
 
 ```python
-# MCP: Open standard for tool discovery and invocation
-# Transport: Streamable HTTP (2025 revision, replaces SSE)
-# Adopted by: Claude, LangGraph, CrewAI, OpenAI Agents SDK, Agno, and 12+ frameworks
+# mcp 2.3.0 (PyPI, 2026-10-02). In 1.x the server class was mcp.server.fastmcp.FastMCP.
+from mcp.server import MCPServer
 
-from mcp.server import FastMCP
+mcp = MCPServer("warehouse-tools")
 
-app = FastMCP("my-tools")
-
-@app.tool()
-def get_weather(city: str, units: str = "celsius") -> dict:
-    """Get current weather for a city."""
-    return weather_api.get(city, units)
-
-@app.tool()
-def query_database(sql: str) -> list[dict]:
-    """Execute a read-only SQL query."""
-    return db.execute(sql)
-
-# MCP Resources -- expose data sources
-@app.resource("docs://company-wiki")
-def get_wiki():
-    """Company knowledge base for RAG."""
-    return wiki_content
-
-# Client discovers and calls tools dynamically
-# Any MCP-compatible client can connect: Claude Desktop, Claude Code, VS Code, etc.
-tools = await mcp_client.list_tools()
-result = await mcp_client.call_tool("get_weather", {"city": "Berlin"})
+@mcp.tool()
+def row_count(table: str) -> int:
+    """Return the row count of a Unity Catalog table given as catalog.schema.table."""
+    return run_readonly(f"SELECT count(*) FROM {quote_ident(table)}")
+# Resources: @mcp.resource("docs://{page}") exposes read-only context the same way
 ```
 
-## Provider Comparison (2026)
+```python
+import asyncio
+from mcp import Client
 
-| Feature | OpenAI | Anthropic | Google | MCP |
-|---------|--------|-----------|--------|-----|
-| Format | `tools` array | `tools` array | `tools` array | JSON-RPC |
-| Schema | JSON Schema | JSON Schema | JSON Schema | JSON Schema |
-| Parallel calls | Yes | Yes | Yes | Yes |
-| Force tool use | `tool_choice: required` | `tool_choice: any` | `tool_config` | N/A |
-| Max tools | 128 | 64 | 64 | Unlimited |
-| Computer Use | No | Yes (Claude 4.x) | No | Via tools |
-| Agent SDK | OpenAI Agents SDK | Claude Agent SDK | ADK | LangGraph |
+async def main() -> None:
+    async with Client("http://localhost:8000/mcp") as client:   # a URL means Streamable HTTP
+        result = await client.call_tool("row_count", {"table": "main.sales.orders"})
+        print(result.structured_content)
+
+asyncio.run(main())
+```
+
+| MCP 2026-07-28 change | Practical effect |
+|-----------------------|------------------|
+| Stateless: no `initialize` handshake, no `Mcp-Session-Id` | Every request carries protocol version and client capabilities in `_meta`; servers implement `server/discover` |
+| Multi Round-Trip Requests (`resultType: "input_required"`) | Replace server-initiated sampling/elicitation/roots requests |
+| `subscriptions/listen` | Replaces the HTTP GET stream and `resources/subscribe` |
+| SSE resumability removed | A broken stream loses the request; re-issue it with a new ID |
+| **Deprecated**: Roots, Sampling, Logging; HTTP+SSE transport; OAuth Dynamic Client Registration (use Client ID Metadata Documents) | Do not adopt them in new servers |
+
+## Provider Comparison
+
+| Feature | Anthropic (Messages) | OpenAI (Responses) | MCP |
+|---------|----------------------|--------------------|-----|
+| Tool schema key | `input_schema` | `parameters` | `inputSchema` (JSON Schema 2020-12) |
+| Schema guarantee | `strict: true` on the tool | `strict: true` on the function | Server validates |
+| Forcing a call | `tool_choice` `any`/`tool` returns 400 on Fable 5.1, Opus 5.5, Sonnet 5.5 — use `auto` + prompt + `strict` | `tool_choice: {"type": "function", "name": ...}` | N/A |
+| Large tool catalogs | Tool search (`tool_search_tool_regex_20251119` / `_bm25_20251119`) + `defer_loading` | `defer_loading` on function tools + tool search | Deterministic `tools/list` order helps prompt caching |
+| Remote MCP from the API | MCP connector, beta `mcp-client-2025-11-20` (HTTP servers only) | `{"type": "mcp", "server_label": ...}` tool | — |
+| Computer use | `computer_toolset_20260801` on Opus 5.5 / Sonnet 5.5 (Claude API, Google Cloud) | Provider tool | Via tools |
+| Agent SDK | Claude Agent SDK | OpenAI Agents SDK | Supported by most frameworks |
 
 ## Common Mistakes
 
 ### Wrong
+
 ```python
-# Trusting LLM-generated arguments without validation
-tool_args = json.loads(llm_response.tool_call.arguments)
-result = dangerous_function(**tool_args)  # SQL injection, path traversal
+# Trusting model-generated arguments and string-building SQL
+args = json.loads(call.arguments)
+db.execute(f"SELECT * FROM {args['table']} WHERE id = {args['id']}")
 ```
 
 ### Correct
+
 ```python
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field
 
-class SearchArgs(BaseModel):
-    query: str
-    limit: int = 10
-    @field_validator("limit")
-    @classmethod
-    def limit_range(cls, v):
-        return max(1, min(v, 100))
-    @field_validator("query")
-    @classmethod
-    def sanitize_query(cls, v):
-        return v.replace(";", "").replace("--", "")
+class LookupArgs(BaseModel):
+    table: str = Field(pattern=r"^[a-z_]+\.[a-z_]+\.[a-z_]+$")   # allowlisted shape
+    id: int = Field(ge=1)
 
-args = SearchArgs(**json.loads(llm_response.tool_call.arguments))
-result = search_database_fn(query=args.query, limit=args.limit)
+args = LookupArgs.model_validate(tool_use.input)    # Claude: dict already parsed
+if args.table not in ALLOWED_TABLES:
+    raise PermissionError(args.table)
+db.execute("SELECT * FROM IDENTIFIER(:t) WHERE id = :id", {"t": args.table, "id": args.id})
 ```
 
 ## Best Practices
 
 | Practice | Rationale |
 |----------|-----------|
-| Validate all arguments with Pydantic | Prevent injection attacks |
-| Add `requires_confirmation` for destructive ops | Human-in-the-loop safety |
-| Limit tool count per request (< 20) | Reduces confusion and latency |
-| Include clear descriptions and examples | Improves tool selection accuracy |
-| Return structured results (not raw text) | Easier for LLM to reason about |
-| Use MCP for tool distribution | Universal standard, reusable across clients |
-| Version your tool schemas | Breaking changes break agents |
+| Validate every argument (Pydantic) and allowlist identifiers | Prevents injection and path traversal |
+| Require confirmation for destructive tools | OWASP LLM06 Excessive Agency |
+| Write detailed tool descriptions | Under-description is the most common tool-use failure |
+| Return all parallel `tool_result` blocks in one user message; `is_error: true` on failure | Keeps parallel calling working |
+| Use tool search / `defer_loading` instead of a fixed tool-count rule | Large catalogs stay usable |
 
 ## Related
 
+- [Claude API Surface](../concepts/anthropic-api-surface.md)
 - [Multi-Agent Systems](../concepts/multi-agent-systems.md)
 - [Guardrails](../concepts/guardrails.md)
-- [Agentic Workflow Pattern](../patterns/agentic-workflow.md)
+
+## Sources
+
+- https://modelcontextprotocol.io/specification/2026-07-28/changelog
+- https://modelcontextprotocol.io/specification/2026-07-28/basic/transports
+- https://github.com/modelcontextprotocol/python-sdk ; https://pypi.org/project/mcp/
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+- https://platform.claude.com/docs/en/agents-and-tools/mcp-connector
+- https://platform.openai.com/docs/guides/structured-outputs
+- https://developers.openai.com/api/reference/resources/responses/methods/create

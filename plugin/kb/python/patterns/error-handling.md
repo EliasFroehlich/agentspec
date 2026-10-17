@@ -1,7 +1,7 @@
 # Error Handling
 
-> **Purpose**: Exception hierarchy, custom errors, and recovery patterns for robust Python code
-> **MCP Validated:** 2026-02-17
+> **Purpose**: Exception hierarchy, custom errors, and recovery patterns for robust Python code (3.12+)
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -42,13 +42,14 @@ class ExternalServiceError(AppError):
         super().__init__(f"Service {service} failed (status={status_code})", code="EXTERNAL_ERROR")
 ```
 
-### Exception Handling Best Practices
+### Exception Handling at a Boundary
 
 ```python
 import logging
 logger = logging.getLogger(__name__)
 
 def process_record(record: dict) -> dict:
+    """Pipeline boundary: translate unknown failures once, with the original chained."""
     try:
         validated = validate(record)
         return enrich(validated)
@@ -58,18 +59,20 @@ def process_record(record: dict) -> dict:
     except ExternalServiceError as e:
         logger.error("Service %s unavailable: %s", e.service, e)
         raise
-    except Exception as e:
-        logger.exception("Unexpected error processing record: %s", e)
+    except Exception as e:  # only at the outermost boundary, never deep in the call stack
+        logger.exception("Unexpected error processing record")
         raise AppError(f"Processing failed: {e}", code="INTERNAL") from e
 ```
 
 ## Exception Chaining (from)
 
 ```python
+import json
+
+
 def load_config(path: str) -> dict:
     try:
-        with open(path) as fh:
-            import json
+        with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except FileNotFoundError as e:
         raise NotFoundError("config_file", path) from e
@@ -82,39 +85,31 @@ def load_config(path: str) -> dict:
 ```python
 import time
 from collections.abc import Callable
-from typing import TypeVar
 
-T = TypeVar("T")
 
-def retry(
-    fn: Callable[..., T], *args,
+def retry[T](  # PEP 695 generic (3.12+)
+    fn: Callable[..., T], *args: object,
     max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0,
-    catch: tuple[type[Exception], ...] = (Exception,),
+    catch: tuple[type[Exception], ...] = (ConnectionError, TimeoutError),
 ) -> T:
-    """Retry a callable with exponential backoff."""
-    last_error: Exception | None = None
+    """Retry a callable with exponential backoff; only retry transient errors."""
     for attempt in range(1, max_attempts + 1):
         try:
             return fn(*args)
-        except catch as e:
-            last_error = e
+        except catch:
             if attempt == max_attempts:
-                break
-            wait = delay * (backoff ** (attempt - 1))
-            time.sleep(wait)
-    raise last_error
+                raise
+            time.sleep(delay * backoff ** (attempt - 1))
+    raise AssertionError("unreachable")
 ```
 
 ## Result Pattern (No Exceptions)
 
 ```python
 from dataclasses import dataclass
-from typing import Generic, TypeVar
-
-T = TypeVar("T")
 
 @dataclass(frozen=True, slots=True)
-class Success(Generic[T]):
+class Success[T]:
     value: T
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +132,29 @@ match parse_int("42"):
     case Failure(error=msg):
         print(f"Error: {msg}")
 ```
+
+## Exception Groups (3.11+) and `except A, B:` (3.14+)
+
+```python
+def load_all(paths: list[str]) -> list[dict]:
+    results, errors = [], []
+    for path in paths:
+        try:
+            results.append(load_config(path))
+        except (NotFoundError, ValidationError) as e:   # parentheses: required before 3.14
+            errors.append(e)
+    if errors:
+        raise ExceptionGroup("some configs failed", errors)
+    return results
+
+try:
+    load_all(["a.json", "b.json"])
+except* NotFoundError as group:        # handles only the NotFoundError members
+    logger.warning("%d missing files", len(group.exceptions))
+```
+
+Python 3.14 accepts `except A, B:` without parentheses (PEP 758, only without `as`); it is a
+SyntaxError on 3.12/3.13, so keep the parenthesized form in code that runs on DBR 17.3 LTS.
 
 ## Common Mistakes
 
@@ -163,7 +181,7 @@ except (ValueError, TypeError) as e:
 
 | Principle | Practice |
 |-----------|----------|
-| Catch specific | `except ValueError` not `except Exception` |
+| Catch specific | `except ValueError`; `except Exception` only at the outermost boundary |
 | Chain always | `raise NewError() from original` |
 | Log at boundaries | Log once where you handle, not where you raise |
 | Fail fast | Validate inputs early, raise immediately |

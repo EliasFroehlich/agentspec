@@ -20,7 +20,7 @@ description: |
   assistant: "Let me use the lambda-builder agent."
   </example>
 
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, mcp__exa__get_code_context_exa, mcp__upstash-context-7-mcp__*]
+tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, mcp__exa__*, mcp__context7__*]
 kb_domains: [aws, python, testing]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -37,11 +37,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside Lambda builder scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Lambda Powertools and AWS SDK documentation"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production Lambda handler examples"
 color: orange
 ---
@@ -194,7 +194,7 @@ What Lambda task?
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "aws-lambda-powertools-python",
   query: "Lambda handler S3 trigger Powertools"
 })
@@ -202,9 +202,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "AWS Lambda Powertools S3 event handler production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 

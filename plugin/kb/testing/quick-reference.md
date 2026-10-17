@@ -1,102 +1,99 @@
 # Python Testing Quick Reference
 
-> Fast lookup tables. For code examples, see linked files.
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Fast lookup tables; code examples live in the linked files
+> **Confidence**: 0.95
+> **MCP Validated**: 2026-10-17
 
-## pytest CLI Commands (pytest 8+)
+## Versions (2026-10-17)
 
-| Command | Purpose | Notes |
-|---------|---------|-------|
-| `pytest` | Run all tests | Auto-discovers test_*.py |
-| `pytest tests/test_foo.py` | Run single file | Specific module |
-| `pytest -k "name"` | Filter by name | Substring match |
-| `pytest -m "marker"` | Filter by marker | Run marked tests only |
-| `pytest -x` | Stop on first failure | Fast feedback |
-| `pytest -v` | Verbose output | Show each test name |
-| `pytest --tb=short` | Short tracebacks | Cleaner output |
-| `pytest --co` | Collect only | List tests without running |
-| `pytest -n auto` | Parallel execution | Requires pytest-xdist |
-| `pytest --lf` | Re-run last failed | Fast iteration |
-| `pytest --ff` | Failures first | Run failed first, then rest |
-| `pytest --sw` | Stepwise | Stop on fail, resume next run |
+| Tool | Current | On Databricks Runtime 17.3 LTS |
+|------|---------|--------------------------------|
+| pytest | 9.1.1 | 8.3.5 preinstalled (no `strict`, subtests, `[tool.pytest]`) |
+| pytest-asyncio | 1.4.0 (`event_loop` fixture removed in 1.0.0) | install it |
+| Hypothesis | 6.170.1 | install it |
+| PySpark | 4.2.0 | Spark 4.0.0 (ANSI on); `pyspark.testing` 4.0 API |
+
+## pytest CLI
+
+| Command | Purpose |
+|---------|---------|
+| `pytest -x` / `--sw` | Stop at first failure / stepwise |
+| `pytest --lf` / `--ff` | Last failed only / failures first |
+| `pytest -k "expr"` / `-m "marker"` | Filter by name / marker |
+| `pytest -ra` | Summary of skips/xfails/errors |
+| `pytest --co -q` | List test IDs only |
+| `pytest -p no:cacheprovider` | No `.pytest_cache` (read-only filesystems) |
+| `pytest --strict` | All strictness options (pytest 9+) |
+| `pytest -n auto` | Parallel (pytest-xdist) |
 
 ## Fixture Scopes
 
 | Scope | Lifecycle | Use Case |
 |-------|-----------|----------|
-| `function` | Per test (default) | Independent test state |
-| `class` | Per test class | Shared class state |
-| `module` | Per .py file | Expensive module setup |
-| `package` | Per package | Package-level resources |
-| `session` | Entire run | DB connections, Spark sessions |
+| `function` | Per test (default) | Mutable state |
+| `module` / `package` | Per file / package | Expensive read-only setup |
+| `session` | Entire run | SparkSession, DB engine (`tmp_path_factory`) |
 
 ## Mock Patterns
 
-| Pattern | Syntax | Use Case |
-|---------|--------|----------|
-| Patch function | `@mock.patch("module.func")` | Replace a function |
-| Patch method | `@mock.patch.object(Class, "method")` | Replace a method |
-| Return value | `mock_obj.return_value = X` | Control output |
-| Side effect | `mock_obj.side_effect = [1, 2, 3]` | Sequential returns |
-| Exception | `mock_obj.side_effect = ValueError` | Simulate errors |
-| Monkeypatch | `monkeypatch.setattr(obj, "attr", val)` | pytest-native patching |
-| Env vars | `monkeypatch.setenv("KEY", "val")` | Override env variables |
+| Pattern | Syntax |
+|---------|--------|
+| Patch where looked up | `@mock.patch("myapp.service.fetch")` |
+| Plugin fixture | `mocker.patch(...)`, `mocker.spy(obj, "name")` (pytest-mock) |
+| Return / sequence / raise | `m.return_value = X` / `m.side_effect = [1, 2]` / `m.side_effect = ValueError` |
+| Async | `AsyncMock()`, `assert_awaited_once()` |
+| Env / attribute | `monkeypatch.setenv("KEY", "v")`, `monkeypatch.setattr(obj, "attr", v)` |
 
-## pytest-asyncio Patterns
+## pytest-asyncio 1.x
 
-| Pattern | Syntax | Notes |
-|---------|--------|-------|
-| Async test | `@pytest.mark.asyncio` + `async def test_x():` | Requires `pytest-asyncio` |
-| Async fixture | `@pytest.fixture` + `async def setup():` | Supports yield for teardown |
-| Auto mode | `asyncio_mode = "auto"` in pyproject.toml | All async tests auto-detected |
-| Strict mode | `asyncio_mode = "strict"` | Requires explicit marker |
-| Custom event loop | Override `event_loop` fixture | Session-scoped loop |
+| Pattern | Syntax |
+|---------|--------|
+| Async test (strict, default) | `@pytest.mark.asyncio` |
+| Async fixture | `@pytest_asyncio.fixture` (plain `@pytest.fixture` only in auto mode) |
+| Shared loop | `@pytest_asyncio.fixture(loop_scope="session", scope="session")` + `@pytest.mark.asyncio(loop_scope="session")` |
+| Config | `asyncio_mode`, `asyncio_default_fixture_loop_scope`, `asyncio_default_test_loop_scope` |
 
-## Hypothesis (Property-Based Testing)
+## Hypothesis
 
-| Pattern | Syntax | Notes |
-|---------|--------|-------|
-| Basic | `@given(st.integers())` | Auto-generates test inputs |
-| Text | `@given(st.text(min_size=1))` | Random strings |
-| Lists | `@given(st.lists(st.integers()))` | Random lists |
-| Composite | `@st.composite` | Build complex strategies |
-| Assume | `assume(x > 0)` | Filter invalid inputs |
-| Settings | `@settings(max_examples=500)` | Control test count |
-| Reproduce | `@example(42)` | Pin specific case |
+| Pattern | Syntax |
+|---------|--------|
+| Generate / pin | `@given(st.integers())` / `@example(42)` |
+| Tune / profile | `@settings(max_examples=500)` / `settings.register_profile(...)`, `load_profile(...)` |
+| Fixtures | module/session scope only (function scope fails `function_scoped_fixture`) |
 
-## Decision Matrix
+## Spark Assertions
 
-| Use Case | Choose |
-|----------|--------|
-| Isolate a single function | Unit test + mock dependencies |
-| Test API/DB interaction | Integration test + fixtures |
-| Same logic, many inputs | `@pytest.mark.parametrize` |
-| Reusable test objects | Factory fixtures |
-| Test PySpark transforms | SparkSession fixture + DataFrame assertions |
-| Slow/external resource | Mock it or mark with `@pytest.mark.slow` |
-| Test async code | `pytest-asyncio` with `@pytest.mark.asyncio` |
-| Find edge cases automatically | Hypothesis `@given` with strategies |
-| Speed up CI test suite | `pytest-xdist` with `-n auto` |
-| Hide param from test name | `pytest.HIDDEN_PARAM` (pytest 8.4+) |
+| Need | Use |
+|------|-----|
+| Compare DataFrames | `pyspark.testing.assertDataFrameEqual(actual, expected_rows_or_df)` |
+| Compare schemas | `pyspark.testing.assertSchemaEqual(actual.schema, expected)` |
+| ANSI error check | `pytest.raises(PySparkException)` + `exc.value.getCondition()` |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| Patch where defined | Patch where imported |
-| Share mutable state across tests | Use function-scoped fixtures |
-| Assert on mock without `assert_called` | Use `mock.assert_called_once_with(...)` |
-| Hard-code test data everywhere | Use factory fixtures or parametrize |
-| Skip edge cases (None, empty, huge) | Always test boundary conditions |
-| `asyncio.run()` in tests | `@pytest.mark.asyncio` with async test |
-| Manually write 100 edge cases | `@given(st.integers())` with Hypothesis |
-| Sequential CI when tests are independent | `pytest -n auto` with xdist |
+| Async fixture with `@pytest.fixture` (strict mode) | `@pytest_asyncio.fixture` |
+| Override `event_loop` | `loop_scope=` on marker/fixture |
+| `tempfile.mktemp()` / `tmpdir` | `tmp_path` / `tmp_path_factory` |
+| `filterwarnings = ["error", "ignore::DeprecationWarning"]` | Keep `DeprecationWarning` visible; ignore specific modules only |
+| Local Spark tests with ANSI unset | Pin `spark.sql.ansi.enabled` to the target runtime |
+| `pytest_addoption` in a sub-directory conftest | Top-level `tests/conftest.py` |
 
 ## Related Documentation
 
 | Topic | Path |
 |-------|------|
 | pytest basics | `concepts/pytest-basics.md` |
-| Fixture patterns | `concepts/fixtures.md` |
-| Mocking deep dive | `concepts/mocking.md` |
+| Async testing | `concepts/async-testing.md` |
+| Spark testing | `patterns/spark-testing.md` |
 | Full Index | `index.md` |
+
+## Sources
+
+- https://docs.pytest.org/en/stable/changelog.html
+- https://pytest-asyncio.readthedocs.io/en/latest/reference/changelog.html
+- https://hypothesis.readthedocs.io/en/latest/reference/api.html
+- https://spark.apache.org/docs/latest/api/python/reference/pyspark.testing.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
+- https://pytest-mock.readthedocs.io/en/latest/usage.html

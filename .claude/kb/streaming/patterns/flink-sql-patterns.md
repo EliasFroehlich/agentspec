@@ -86,6 +86,7 @@ CREATE TABLE dim_customers (
 ) WITH (
     'connector' = 'kafka',
     'topic' = 'customers-cdc',
+    'properties.bootstrap.servers' = 'kafka:9092',
     'format' = 'debezium-json'
 );
 
@@ -128,3 +129,4 @@ INSERT INTO iceberg_orders SELECT * FROM raw_orders WHERE status = 'completed';
 - [flink-architecture concept](../concepts/flink-architecture.md)
 - [kafka-producer-consumer](kafka-producer-consumer.md)
 - [cdc-patterns](cdc-patterns.md)
+- [flink-cdc-pipelines](flink-cdc-pipelines.md) (Flink CDC 3.x YAML pipelines)

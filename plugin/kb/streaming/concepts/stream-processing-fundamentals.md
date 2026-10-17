@@ -21,6 +21,7 @@ CREATE TABLE page_views (
 ) WITH (
     'connector' = 'kafka',
     'topic'     = 'page_views',
+    'properties.bootstrap.servers' = 'broker1:9092',
     'format'    = 'json'
 );
 
@@ -43,6 +44,7 @@ from pyspark.sql import functions as F
 events = (
     spark.readStream
     .format("kafka")
+    .option("kafka.bootstrap.servers", "broker1:9092")   # required
     .option("subscribe", "page_views")
     .load()
     .selectExpr("CAST(value AS STRING)", "timestamp")

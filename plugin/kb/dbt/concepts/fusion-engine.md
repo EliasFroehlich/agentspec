@@ -1,88 +1,106 @@
-# Fusion Engine
+# dbt v2 and the Fusion Engine
 
-> **Purpose**: Ground-up Rust rewrite of dbt Core execution engine with multi-dialect SQL comprehension
+> **Purpose**: What dbt v2 is (the Rust engine formerly called Fusion), its distributions and licenses, what changes from dbt v1, and how to migrate safely
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26 | Updated with latest Fusion architecture details
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-dbt Labs acquired SDF Labs (a Rust-based SQL compiler) in late 2024, creating the **Fusion Engine**. It is a ground-up, first-principles rewrite of the dbt Core execution engine in Rust, achieving sub-second parse times for projects with 10,000+ models. Beyond speed, Fusion introduces **multi-dialect SQL compilation and validation**, **Arrow Database Connectivity (ADBC) drivers** for faster data transfer, a **Language Server Protocol (LSP)** for IDE integration, and **automatic dependency management** (no JVM or Python required). Fusion enforces the dbt authoring spec more strictly than Core for correctness, and discrepancies can be auto-fixed with the `dbt-autofix` tool.
+dbt Labs acquired SDF Labs (a Rust SQL compiler) on 2025-01-14 and built the **Fusion engine** on it. On
+2026-06-01 the runtime was opened under **Apache 2.0** as the first alpha of dbt "Core" v2.0, and
+**dbt v2.0 reached GA on 2026-09-14** (active support until 2027-09-13). There are now two
+engine generations: **dbt v1** (Python; v1.12 is the current minor) and **dbt v2** (Rust). dbt v2 ships as
+two distributions: **dbt** (formerly "dbt Fusion engine", recommended, proprietary under the dbt Product
+Licensing Agreement) and **dbt OSS** (100 % Apache 2.0 runtime). The name "dbt Core" no longer applies to
+any v2 distribution. "dbt Cloud" is now **dbt platform**. dbt Labs and Fivetran are one company (merger
+official 2026-06-01); dbt OSS remains Apache 2.0.
 
 ## The Concept
 
-```yaml
-# dbt_project.yml — works with both Core and Fusion engines
-name: my_analytics
-version: "1.0.0"
-config-version: 2
+```bash
+# dbt v2 (the "dbt" distribution) — pip or the install script
+python -m pip install dbt
+curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh | sh -s -- --update
+dbt system update                    # update a script/binary install (channel: latest)
+dbt system update --version canary   # opt into the canary channel
 
-# Key Fusion capabilities:
-# - Sub-second parsing (Rust-based SQL compiler)
-# - Column-level lineage without extra config
-# - Multi-dialect SQL compilation, validation, and static analysis
-# - ADBC drivers for improved data transfer and connection handling
-# - Language Server with VS Code extension for IDE-grade autocomplete
-# - Automatic .env file loading
-# - Standalone binary — no JVM or Python runtime required
-# - Automatic dependency installation (packages + database drivers)
-# - dbt code-signed and secure distributions
+# dbt v1 (Python) — adapter package pulls dbt-core 1.x
+python -m pip install dbt-databricks
 
-# Architecture (modular Rust crates):
-#   dbt-adapter    — database operations
-#   dbt-parser     — project resolution
-#   dbt-jinja      — MiniJinja template rendering (Jinja2-compatible)
-#   dbt-schemas    — manifest and artifact handling
-#   dbt-xdbc       — database connectivity (ADBC)
+# Before moving a v1 project to v2: surface and fix every deprecation
+dbt parse --no-partial-parse --show-all-deprecations     # on v1 (omit --no-partial-parse on v2)
+uvx dbt-autofix deprecations --dry-run                   # preview fixes
+uvx dbt-autofix deprecations                             # apply (also: packages, jobs subcommands)
 ```
 
 ## Quick Reference
 
-| Feature | dbt Core (Python) | dbt Fusion (Rust) |
-|---------|-------------------|-------------------|
-| Parse 10K models | 30-60 seconds | < 1 second |
-| Column-level lineage | Requires dbt Cloud | Built-in |
-| IDE autocomplete | Basic (extension) | Full LSP server (VS Code extension) |
-| Multi-dialect SQL | No | Compiles, validates, and analyzes across dialects |
-| .env file support | Manual loading | Automatic |
-| Cross-project refs | dbt Mesh (separate) | Integrated |
-| Database connectivity | Python DB-API | ADBC (Arrow-native, faster transfers) |
-| Dependency install | Manual (pip) | Automatic (drivers + packages) |
-| Runtime requirement | Python | Standalone binary (no JVM/Python) |
-| Jinja rendering | Python Jinja2 | MiniJinja (Rust, Jinja2-compatible) |
-| Status | GA, stable | Beta (GA expected mid-2026) |
+| Item | dbt v1 (Python) | dbt v2 (Rust) |
+|------|-----------------|---------------|
+| Current version | 1.12 (2026-07-16, active to 2027-07-15); 1.11 critical support; 1.9/1.10 deprecated; 1.13 in beta = final 1.x minor | 2.0 GA 2026-09-14; 2.0.8 stable/latest (2026-10-14); 2.0.9 canary |
+| License | Apache 2.0 (`dbt-core`) | **dbt** distribution: dbt Product Licensing Agreement · **dbt OSS**: Apache 2.0 |
+| Release channels | PyPI versions | Local: `latest`, `canary`, `dev`; dbt platform tracks: v2 Nightly, Stable (default), Extended, Fallback |
+| YAML strictness | Deprecation warnings | Some deprecations are errors — e.g. generic-test inputs **must** be under `arguments:` |
+| Adapters | All dbt v1 adapters | GA: Snowflake, BigQuery, Databricks, Redshift, DuckDB (CLI); Apache Spark (CLI) beta |
+| Free features | — | Syntax error detection, `dbt lint`, dbt docs v2, LSP lite (go-to ref/source/macro) |
+| With a dbt platform login (free tier included) | — | Full LSP, SQL comprehension / type checking / impact analysis, precise column-level lineage, Catalog tab |
+| Unit tests | Run on the warehouse | Same; experimental local DuckDB execution (`config: {compute: local}` + `DBT_ENGINE_EXPERIMENTAL_LOCAL_UNIT_TESTS=true`) only for Snowflake/BigQuery projects |
 
-### Migration: Core to Fusion
+The open repository `github.com/dbt-labs/dbt` (Apache-2.0) contains the Rust runtime as crates such as
+`dbt-jinja` and `dbt-parser`.
 
-| Step | Details |
-|------|---------|
-| 1. Validate | Run `dbt-autofix` to resolve strict-mode discrepancies |
-| 2. Test in dev | Compare `dbt compile` output between Core and Fusion |
-| 3. Check YAML | Fusion validates YAML configs more strictly than Core |
-| 4. Verify macros | MiniJinja is Jinja2-compatible but edge cases may differ |
-| 5. Promote | Migrate to Fusion only after output parity confirmed |
+### Migration v1 → v2
+
+| Step | Action |
+|------|--------|
+| 1. Upgrade v1 | Move to 1.12 and enable the behavior-change flags (1.13 makes the 1.9/1.10 flags default `true`) |
+| 2. Clear deprecations | `dbt parse --show-all-deprecations`; `dbt-autofix deprecations` (v0.22.x) moves test inputs under `arguments:`, `meta`/`tags` under `config:`, legacy semantic-layer YAML (`--semantic-layer`) |
+| 3. Check packages | `dbt-autofix packages`; pin package versions that declare v2 support (`require-dbt-version` < 3.0.0) |
+| 4. Compare | Build in dev with v2 and diff compiled SQL and row counts against v1 |
+| 5. Promote | Switch the dbt platform environment track or the CI image; keep a v1 fallback until parity is proven |
 
 ## Common Mistakes
 
 ### Wrong
 
-```bash
-# Assuming Fusion is a drop-in replacement today
-# Fusion is in beta — test before migrating production
-dbt run --target prod  # on Fusion CLI without testing
+```yaml
+# Accepted by v1 with a deprecation warning; a validation error on dbt v2
+columns:
+  - name: status
+    data_tests:
+      - accepted_values:
+          values: ['placed', 'shipped']
 ```
 
 ### Correct
 
-```bash
-# Test Fusion in dev first, compare output with Core
-dbt compile --target dev  # Fusion CLI
-dbt compile --target dev  # Core CLI
-diff target/compiled/     # Compare generated SQL
-
-# Migrate to Fusion only after output parity confirmed
+```yaml
+columns:
+  - name: status
+    data_tests:
+      - accepted_values:
+          arguments:
+            values: ['placed', 'shipped']
+          config:
+            severity: warn
 ```
 
 ## Related
 
-- [mesh-architecture](../concepts/mesh-architecture.md)
-- [model-types](../concepts/model-types.md)
+- [testing-framework](testing-framework.md) — `data_tests` / `arguments` / `config`
+- [dbt-databricks-adapter](dbt-databricks-adapter.md)
+- [mesh-architecture](mesh-architecture.md)
+
+## Sources
+
+- https://www.getdbt.com/blog/dbt-labs-announces-sdf-labs-acquisition
+- https://docs.getdbt.com/blog/dbt-core-v2-is-here
+- https://docs.getdbt.com/docs/dbt-versions
+- https://docs.getdbt.com/docs/dbt/dbt-releases
+- https://docs.getdbt.com/docs/dbt/dbt-availability
+- https://docs.getdbt.com/docs/local/install-dbt
+- https://www.getdbt.com/licenses-faq
+- https://www.getdbt.com/blog/fivetran-and-dbt-are-one-company-now-here-s-what-that-means
+- https://docs.getdbt.com/reference/deprecations
+- https://github.com/dbt-labs/dbt-autofix
+- https://docs.getdbt.com/docs/build/unit-tests

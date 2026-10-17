@@ -1,143 +1,133 @@
-# CDC Complete Examples
+# CDC Complete Example
 
-> Source: https://docs.databricks.com/aws/en/dlt/cdc
-> Lines: < 200
+> **Purpose**: End-to-end CDC pipeline (bronze feed, validated silver feed, SCD Type 1 and Type 2 gold) in Python and SQL
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Complete Python Example
+## When to Use
+
+- Replicating an operational table into the lakehouse from a CDC feed landed as files
+- Serving both "current state" and "full history" tables from one feed
+- Handling out-of-order events and deletes without hand-written MERGE logic
+
+## Implementation
 
 ```python
-import dlt
-from pyspark.sql import functions as F
+from pyspark import pipelines as dp
+from pyspark.sql.functions import col, expr
 
-# Bronze: Raw CDC events
-@dlt.table()
+LANDING = spark.conf.get("landing_path")   # e.g. /Volumes/main/landing/files/users
+
+# Bronze: raw CDC events (JSON files)
+@dp.table(comment="Raw user CDC events")
 def users_cdc_bronze():
-    return (
-        spark.readStream
-        .format("cloudFiles")
-        .option("cloudFiles.format", "json")
-        .load("s3://bucket/cdc/users/")
-    )
+    return (spark.readStream.format("cloudFiles")
+            .option("cloudFiles.format", "json")
+            .option("cloudFiles.inferColumnTypes", "true")
+            .load(LANDING)
+            .select("*", col("_metadata.file_path").alias("_source_file")))
 
-# Silver: Cleaned CDC events
-@dlt.table()
-@dlt.expect_or_drop("valid_operation", "operation IN ('INSERT', 'UPDATE', 'DELETE')")
-@dlt.expect_or_drop("valid_sequence", "sequence_num IS NOT NULL")
+# Silver: validated event stream
+@dp.table(comment="Validated user CDC events")
+@dp.expect_or_drop("valid_operation", "operation IN ('INSERT', 'UPDATE', 'DELETE')")
+@dp.expect_or_drop("valid_sequence", "sequence_num IS NOT NULL")
+@dp.expect_or_drop("valid_key", "user_id IS NOT NULL")
 def users_cdc_silver():
-    return dlt.read_stream("users_cdc_bronze")
+    return spark.readStream.table("users_cdc_bronze")
 
-# Gold: Current state (SCD Type 1)
-dlt.create_streaming_table("users_current")
-
-dlt.apply_changes(
+# Gold: current state (SCD Type 1)
+dp.create_streaming_table("users_current", cluster_by=["user_id"])
+dp.create_auto_cdc_flow(
+    name="users_current_cdc",
     target="users_current",
     source="users_cdc_silver",
     keys=["user_id"],
-    sequence_by="sequence_num",
-    apply_as_deletes=F.expr("operation = 'DELETE'"),
-    except_column_list=["operation", "sequence_num"],
-    stored_as_scd_type=1
+    sequence_by=col("sequence_num"),
+    apply_as_deletes=expr("operation = 'DELETE'"),
+    except_column_list=["operation", "sequence_num", "_source_file"],
+    stored_as_scd_type=1,
 )
 
-# Gold: Historical tracking (SCD Type 2)
-dlt.create_streaming_table("users_history")
-
-dlt.apply_changes(
+# Gold: history (SCD Type 2)
+dp.create_streaming_table("users_history")
+dp.create_auto_cdc_flow(
+    name="users_history_cdc",
     target="users_history",
     source="users_cdc_silver",
     keys=["user_id"],
-    sequence_by="sequence_num",
-    apply_as_deletes=F.expr("operation = 'DELETE'"),
-    except_column_list=["operation", "sequence_num"],
-    stored_as_scd_type=2
+    sequence_by=col("sequence_num"),
+    apply_as_deletes=expr("operation = 'DELETE'"),
+    except_column_list=["operation", "sequence_num", "_source_file"],
+    stored_as_scd_type="2",
 )
 ```
-
-## Complete SQL Example
 
 ```sql
--- Bronze: Raw CDC events
-CREATE OR REFRESH STREAMING TABLE users_cdc_bronze
-AS SELECT *
-FROM STREAM read_files("s3://bucket/cdc/users/", format => "json")
+-- Same pipeline in SQL
+CREATE OR REFRESH STREAMING TABLE users_cdc_bronze AS
+SELECT *, _metadata.file_path AS _source_file
+FROM STREAM read_files("${landing_path}", format => "json", inferColumnTypes => true);
 
--- Silver: Cleaned CDC events
-CREATE OR REFRESH STREAMING TABLE users_cdc_silver(
-    CONSTRAINT valid_operation
-    EXPECT (operation IN ('INSERT', 'UPDATE', 'DELETE'))
-    ON VIOLATION DROP ROW,
+CREATE OR REFRESH STREAMING TABLE users_cdc_silver (
+  CONSTRAINT valid_operation EXPECT (operation IN ('INSERT','UPDATE','DELETE')) ON VIOLATION DROP ROW,
+  CONSTRAINT valid_sequence  EXPECT (sequence_num IS NOT NULL) ON VIOLATION DROP ROW,
+  CONSTRAINT valid_key       EXPECT (user_id IS NOT NULL)      ON VIOLATION DROP ROW
+) AS SELECT * FROM STREAM(users_cdc_bronze);
 
-    CONSTRAINT valid_sequence
-    EXPECT (sequence_num IS NOT NULL)
-    ON VIOLATION DROP ROW
-)
-AS SELECT * FROM STREAM users_cdc_bronze
-
--- Gold: Current state (SCD Type 1)
 CREATE OR REFRESH STREAMING TABLE users_current;
-
-APPLY CHANGES INTO users_current
-FROM STREAM users_cdc_silver
+CREATE FLOW users_current_cdc AS AUTO CDC INTO users_current
+FROM STREAM(users_cdc_silver)
 KEYS (user_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_num
-COLUMNS * EXCEPT (operation, sequence_num)
-STORED AS SCD TYPE 1
+COLUMNS * EXCEPT (operation, sequence_num, _source_file)
+STORED AS SCD TYPE 1;
 
--- Gold: Historical tracking (SCD Type 2)
 CREATE OR REFRESH STREAMING TABLE users_history;
-
-APPLY CHANGES INTO users_history
-FROM STREAM users_cdc_silver
+CREATE FLOW users_history_cdc AS AUTO CDC INTO users_history
+FROM STREAM(users_cdc_silver)
 KEYS (user_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_num
-COLUMNS * EXCEPT (operation, sequence_num)
-STORED AS SCD TYPE 2
+COLUMNS * EXCEPT (operation, sequence_num, _source_file)
+STORED AS SCD TYPE 2;
 ```
 
-## Out-of-Sequence Handling
+## Configuration
 
-CDC automatically handles out-of-order events using the sequence column:
+| Pipeline setting | Value | Why |
+|------------------|-------|-----|
+| `configuration.landing_path` | `/Volumes/<catalog>/<schema>/<volume>/users` | Read by `spark.conf.get` / `${landing_path}` |
+| `serverless` | `true` | Serverless includes the edition needed for CDC and expectations |
+| Pipeline mode | triggered | Schedule with a Lakeflow Job |
 
-```python
-# Events arrive: sequence 3, 1, 2
-# Lakeflow processes them in order: 1, 2, 3
-sequence_by="timestamp"
-```
+## Example Usage
 
-## Best Practices
+Events arriving in order 3, 1, 2 for the same key are applied by `sequence_num`; a late lower
+sequence never overwrites a higher one. Expected outcome after the official tutorial data set:
+SCD Type 1 holds one row per surviving key; SCD Type 2 holds one row per version, with the current
+row having `__END_AT IS NULL`.
 
-1. **Choose the right SCD type**:
-   - Type 1 for current state
-   - Type 2 for historical tracking
+Rules to remember:
 
-2. **Use appropriate sequence columns**:
-   - Timestamps for time-based ordering
-   - Auto-increment IDs for insertion ordering
-   - Composite keys when needed
+- `NULL` in the sequencing column is not supported.
+- Keep one distinct update per key per sequence value; otherwise tie-break with `struct(...)`.
+- Identity columns are not supported on AUTO CDC targets.
+- Auto Loader does not guarantee file order; raise `pipelines.cdc.tombstoneGCThresholdInSeconds`
+  above the maximum expected arrival delay when deletes may arrive late.
 
-3. **Handle deletes explicitly**:
-   - Define delete conditions clearly
-   - Test delete logic thoroughly
+## See Also
 
-4. **Monitor CDC performance**:
-   - Track update latency
-   - Monitor out-of-order event counts
-   - Optimize sequence column indexing
+- [CDC with AUTO CDC](cdc-apply-changes.md)
+- [CDC fundamentals](../concepts/cdc-fundamentals.md)
+- [Expectations](expectations.md)
 
-5. **Test with edge cases**:
-   - Out-of-order events
-   - Duplicate sequence values
-   - Late-arriving data
-   - Delete operations
+## Sources
 
-## Limitations
-
-- NULL sequencing values not supported
-- Requires one distinct update per key at each sequence value
-- Must use supported data types for sequencing
-
-## Related
-
-- [CDC Apply Changes](cdc-apply-changes.md)
-- [Data Quality Expectations](expectations.md)
-- [Python Streaming](python-streaming.md)
+- https://docs.databricks.com/aws/en/ldp/cdc
+- https://docs.databricks.com/aws/en/ldp/tutorial-pipelines
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-apply-changes
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-streaming-table
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-apply-changes-into
+- https://docs.databricks.com/aws/en/ldp/limitations
+- https://docs.databricks.com/aws/en/ldp/serverless

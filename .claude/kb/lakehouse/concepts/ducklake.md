@@ -1,108 +1,99 @@
 # DuckLake
 
-> **Purpose**: DuckDB-based lakehouse with SQL catalog — sub-TB, single-node, local-first, Iceberg interop
+> **Purpose**: DuckLake 1.0 — lakehouse format with a SQL-database catalog, Parquet data, data inlining, Iceberg interop; reference implementation is the DuckDB `ducklake` extension
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-DuckLake is an open lakehouse format (launched May 2025) where a standard SQL database stores all metadata instead of complex file hierarchies, while data lives in open formats like Parquet on object storage. DuckLake 0.3 (Sep 2025) added Iceberg interoperability (shallow copy between DuckLake and Iceberg), geometry/spatial type support, and improved robustness. The format provides true multi-table ACID transactions, built-in encryption, data inlining for small values, and dramatically simpler operations compared to Iceberg/Delta for sub-TB workloads.
+DuckLake is an open lakehouse format in which a SQL database stores all metadata (snapshots, schemas, file lists, statistics) while data lives as Parquet on local disk or object storage. **DuckLake v1.0 (2026-04-13)** is declared production-ready with guaranteed backward compatibility; its reference implementation is the `ducklake` extension shipped with **DuckDB 1.5.2**. v1.0 brought full inlining of small inserts, updates and deletes into the catalog database, sorted tables, Iceberg-compatible bucket partitioning and Iceberg-compatible deletion vectors (Puffin). Besides DuckDB there are clients for Apache Spark, Trino, Apache DataFusion and pandas, and a hosted service from MotherDuck. Planned next: spec v1.1 (variant inlining, multi-deletion-vector Puffin files); v2.0 ideas include permission-based roles.
 
 ## The Concept
 
 ```sql
--- Install and load the DuckLake extension
 INSTALL ducklake;
-LOAD ducklake;
+INSTALL postgres;
 
--- Attach a DuckLake catalog (metadata in DuckDB, data in S3)
-ATTACH 'ducklake:s3://my-bucket/ducklake-catalog.db' AS lakehouse;
+-- Multi-user lakehouse: PostgreSQL catalog (12+), data in object storage
+ATTACH 'ducklake:postgres:dbname=ducklake_catalog host=localhost' AS lake
+    (DATA_PATH 's3://my-bucket/lake/');
+USE lake;
 
--- Create a table (data written as Parquet to S3)
-CREATE TABLE lakehouse.analytics.events (
-    event_id    VARCHAR,
-    user_id     VARCHAR,
-    event_type  VARCHAR,
-    event_ts    TIMESTAMP,
-    payload     JSON
+CREATE SCHEMA IF NOT EXISTS analytics;
+CREATE TABLE analytics.events (
+    event_id   VARCHAR,
+    user_id    VARCHAR,
+    event_type VARCHAR,
+    event_ts   TIMESTAMP,
+    payload    JSON
 );
 
--- Insert data (written to Parquet files on S3)
-INSERT INTO lakehouse.analytics.events
+INSERT INTO analytics.events
 SELECT * FROM read_parquet('s3://raw-data/events/*.parquet');
 
--- Query with full SQL (DuckDB engine)
-SELECT event_type, COUNT(*) AS cnt, DATE_TRUNC('hour', event_ts) AS hour
-FROM lakehouse.analytics.events
-WHERE event_ts >= '2026-03-01'
-GROUP BY event_type, hour
-ORDER BY cnt DESC;
+-- Layout options added in v1.0
+ALTER TABLE analytics.events SET SORTED BY (event_ts ASC);
+ALTER TABLE analytics.events SET PARTITIONED BY (bucket(8, user_id));
 
--- Time travel (snapshot-based)
-SELECT * FROM lakehouse.analytics.events AT (TIMESTAMP '2026-03-25');
+-- Time travel
+SELECT * FROM analytics.events AT (VERSION => 3);
+SELECT * FROM analytics.events AT (TIMESTAMP => now() - INTERVAL '1 week');
 ```
 
 ## Quick Reference
 
-| Feature | DuckLake 0.3 | Iceberg v3 | Delta 4.1 |
-|---------|---------|---------|-------|
-| Best scale | < 500 GB | TB-PB | TB-PB |
-| Catalog | SQL database (DuckDB/Postgres/MySQL) | REST/HMS/Glue | Unity/_delta_log |
-| Engine | DuckDB (+ Iceberg bridge) | Multi-engine | Spark-native, some multi |
-| Transactions | ACID (multi-table) | ACID (per-table) | ACID (per-table) |
-| Time travel | Yes (snapshot-based) | Yes | Yes |
-| Partition evolution | N/A (columnar scan) | Yes | No (liquid clustering) |
-| Encryption | Built-in (zero-trust) | External (cloud KMS) | External (cloud KMS) |
-| Data inlining | Yes (small values stored in metadata) | No | No |
-| Iceberg interop | Shallow copy (v0.3) | Native | Via UniForm |
-| Geometry/spatial | Yes (v0.3) | Yes (v3) | No |
-| Cost | Zero (open source) | Zero + infra | Zero + infra |
-| Use case | Dev, CI/CD, local analytics, edge | Production lakehouse | Production lakehouse |
+| Catalog database | When (DuckLake docs) |
+|---|---|
+| DuckDB file (`ATTACH 'ducklake:metadata.ducklake' AS lake (DATA_PATH '...')`) | Single client only |
+| SQLite (`ducklake:sqlite:metadata.sqlite`) | Several local clients |
+| PostgreSQL (`ducklake:postgres:...`) | Multi-user lakehouse with remote clients |
+| MySQL 8+ | Documented but **not recommended** (known connector issues) |
 
-### DuckLake Version History
+| Feature | DuckLake 1.0 | Iceberg v3 | Delta 4.x |
+|---|---|---|---|
+| Metadata store | SQL database | Metadata files + catalog | `_delta_log` + catalog |
+| Multi-table transactions | Yes (catalog database ACID) | Catalog-dependent | Catalog-managed tables / catalog commits |
+| Small writes | Data inlining in the catalog | Small files + compaction | Small files + compaction |
+| Partitioning | `SET PARTITIONED BY` (incl. `bucket()` since 1.0); sorted tables | Hidden partitioning + evolution | Liquid clustering |
+| Deletes | Delete files; Iceberg-compatible deletion vectors | Deletion vectors (v3) | Deletion vectors |
+| Engines | DuckDB; Spark, Trino, DataFusion clients | Broad | Broad |
 
-| Version | Date | Key Features |
-|---------|------|-------------|
-| 0.1 | May 2025 | Initial release, SQL-based metadata, Parquet data |
-| 0.2 | Jul 2025 | Relative schema/table paths, structured file layout |
-| 0.3 | Sep 2025 | Iceberg interoperability, geometry support, conflict resolution |
+| Version | Date | Highlights |
+|---|---|---|
+| 0.1 | May 2025 | Initial specification and DuckDB extension |
+| 0.2 | 2025-07-04 | Spec update (see release calendar) |
+| 0.3 | 2025-09-17 | Iceberg interop, geometry, `MERGE INTO`, `CHECKPOINT` |
+| 1.0 | 2026-04-13 | Production-ready spec; inlining of updates/deletes, sorted tables, bucket partitioning, deletion vectors |
 
-## DuckLake 0.3: Iceberg Interop
+## Iceberg Interop (since 0.3)
 
 ```sql
--- Shallow copy from Iceberg to DuckLake (no data rewrite)
 INSTALL iceberg;
 LOAD iceberg;
-
--- Copy Iceberg table into DuckLake (metadata-only, references same Parquet files)
-COPY FROM DATABASE iceberg_catalog TO ducklake_catalog;
-
--- Shallow copy from DuckLake to Iceberg
-COPY FROM DATABASE ducklake_catalog TO iceberg_catalog;
-
--- DuckLake with Postgres as metadata backend (multi-user)
-ATTACH 'ducklake:postgres:dbname=catalog_db' AS lakehouse;
+-- Deep copy (data + metadata of the latest snapshot), either direction
+COPY FROM DATABASE iceberg_datalake TO my_ducklake;
+COPY FROM DATABASE my_ducklake TO iceberg_datalake;   -- target schemas must exist
+-- Metadata-only copy, Iceberg -> DuckLake only, keeps snapshot history
+CALL iceberg_to_ducklake('iceberg_datalake', 'ducklake');
 ```
 
 ## Common Mistakes
 
 ### Wrong
 
-```text
-Using DuckLake for a 10 TB production workload with 50 concurrent users.
-DuckLake is single-node; use Iceberg/Delta for distributed scale.
+```sql
+-- DuckDB-file catalog shared by several writers or services
+ATTACH 'ducklake:metadata.ducklake' AS lake (DATA_PATH 's3://shared/lake/');
+-- "COPY FROM DATABASE" assumed to be metadata-only: it copies the data
 ```
 
 ### Correct
 
-```text
-Use DuckLake for:
-- Development and CI/CD testing (fast, zero infra)
-- Local-first analytics (< 500 GB)
-- MotherDuck for cloud sharing of small-medium datasets
-- Prototyping before Iceberg/Delta migration
-- Edge computing with built-in encryption
-- Iceberg bridge: develop in DuckLake, promote to Iceberg for production
+```sql
+-- Several local clients: SQLite catalog; remote/multi-user: PostgreSQL catalog
+ATTACH 'ducklake:postgres:dbname=ducklake_catalog host=db.internal' AS lake
+    (DATA_PATH 's3://shared/lake/');
+-- Metadata-only Iceberg import: CALL iceberg_to_ducklake(...)
 ```
 
 ## Related
@@ -110,3 +101,12 @@ Use DuckLake for:
 - [iceberg-v3](iceberg-v3.md)
 - [delta-lake](delta-lake.md)
 - [duckdb concept](../../modern-stack/concepts/duckdb.md)
+
+## Sources
+
+- https://ducklake.select/2026/04/13/ducklake-10/
+- https://ducklake.select/2025/09/17/ducklake-03/
+- https://ducklake.select/release_calendar
+- https://ducklake.select/docs/stable/duckdb/usage/choosing_a_catalog_database
+- https://ducklake.select/docs/stable/duckdb/usage/connecting
+- https://ducklake.select/docs/stable/duckdb/usage/time_travel

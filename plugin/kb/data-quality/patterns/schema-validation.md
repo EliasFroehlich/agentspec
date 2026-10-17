@@ -1,7 +1,8 @@
 # Schema Validation
 
-> **Purpose**: JSON Schema, Pydantic for data validation, Avro/Protobuf enforcement at system boundaries
-> **MCP Validated**: 2026-03-26
+> **Purpose**: JSON Schema, Pydantic for record validation, Avro/Protobuf enforcement at system boundaries; pointers for DataFrame and Delta-table schema enforcement
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -13,7 +14,7 @@
 ## Implementation
 
 ```python
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from datetime import date, datetime
 from enum import Enum
 from typing import Optional
@@ -52,8 +53,8 @@ def validate_batch(records: list[dict]) -> tuple[list[Order], list[dict]]:
     for i, record in enumerate(records):
         try:
             valid.append(Order(**record))
-        except Exception as e:
-            errors.append({"row": i, "error": str(e), "data": record})
+        except ValidationError as e:
+            errors.append({"row": i, "error": e.errors(), "data": record})
     return valid, errors
 
 
@@ -98,7 +99,33 @@ order_schema = {
 jsonschema.validate(instance=record, schema=order_schema)
 ```
 
+Pydantic v2 syntax above works on pydantic 2.10.6, the version preinstalled in Databricks Runtime 17.3 LTS.
+
+## DataFrames and Delta Tables
+
+Record-by-record Pydantic validation does not scale to Spark DataFrames. For tabular data:
+
+| Need | Use |
+|------|-----|
+| Schema + value checks on a Spark DataFrame in a job | `pandera.pyspark` `DataFrameModel`, GX Core, Soda `soda-sparkdf` — [pyspark-validation-libs](pyspark-validation-libs.md) |
+| Reject bad writes to a Delta table from any writer | `NOT NULL` and `CHECK` constraints — [databricks-native-dq](databricks-native-dq.md) |
+| Rows that violate rules inside a Lakeflow pipeline | Expectations (`@dp.expect_or_drop`, `CONSTRAINT … EXPECT`) |
+| Column names/types agreed with consumers | ODCS `schema[]` + `datacontract test`, or a dbt model contract |
+
+Delta also enforces the table schema on write (unexpected columns or incompatible types fail unless schema
+evolution is enabled explicitly).
+
 ## See Also
 
 - [data-contracts](../concepts/data-contracts.md)
 - [data-contract-authoring](../patterns/data-contract-authoring.md)
+- [pyspark-validation-libs](pyspark-validation-libs.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/concepts/validators/
+- https://docs.pydantic.dev/latest/errors/validation_errors/
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/delta/schema-validation
+- https://pandera.readthedocs.io/en/stable/pyspark_sql.html

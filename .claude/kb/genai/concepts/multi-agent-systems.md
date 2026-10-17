@@ -1,137 +1,146 @@
 # Multi-Agent Systems
 
-> **Purpose**: Orchestration patterns for coordinating multiple specialized LLM agents
-> **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Orchestration patterns and current frameworks for coordinating specialized LLM agents
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Multi-agent systems coordinate multiple specialized LLM agents to solve complex tasks. Each agent has a defined role, tools, and instructions. An orchestrator manages handoffs, state sharing, and task routing. In 2026, the ecosystem has consolidated around production-grade frameworks: LangGraph (graph-based state machines), CrewAI (role-based crews), Claude Agent SDK (tool-calling agent loop), and OpenAI Agents SDK (handoff-based delegation). MCP (Model Context Protocol) has emerged as the universal tool connectivity standard.
+Multi-agent systems split a task across specialized agents, each with its own instructions and tools, coordinated by a
+graph, a supervisor, or handoffs. Start with the simplest tier that works: a single call or a code-controlled workflow
+handles most tasks; reach for agents only when the work is open-ended and errors are recoverable. On Databricks, Agent
+Bricks hosts agents built with any framework, and Genie Agents can be called as tools.
 
 ## Core Topologies
 
 ```text
-SEQUENTIAL         CONCURRENT          HUB-AND-SPOKE        MESH
-A -> B -> C        A --|                    B                A <-> B
-                   B --|-> Merge        /   |   \            |  X  |
-                   C --|            A --  Hub  -- D           C <-> D
-                                        \   |   /
-                                            C
-
-SUPERVISOR (LangGraph)           SWARM (OpenAI Agents SDK)
-     Supervisor                  A --handoff--> B
-    /    |    \                  B --handoff--> C
-   A     B     C                 C --handoff--> A
-   (router decides next)         (agents delegate dynamically)
+SEQUENTIAL        CONCURRENT          SUPERVISOR (graph)        HANDOFFS (OpenAI Agents SDK)
+A -> B -> C       A --|                  Supervisor             A --handoff--> B
+                  B --|-> merge         /    |    \             B --handoff--> C
+                  C --|                A     B     C            (agents delegate dynamically)
 ```
 
-## Framework Comparison (2026)
+## Framework Comparison (PyPI versions as of 2026-10-17)
 
-| Framework | Architecture | Best For | MCP Support |
-|-----------|-------------|----------|-------------|
-| LangGraph | StateGraph + conditional edges | Production control, durable execution | Yes |
-| CrewAI | Role-based crews with tasks | Rapid prototyping, role assignment | Yes |
-| Claude Agent SDK | Agent loop with tool calling | Claude-native apps, security-first | Native |
-| OpenAI Agents SDK | Handoff-based delegation | OpenAI ecosystem, tracing built-in | Yes |
-| AutoGen (AG2) | Conversation patterns | Enterprise, Semantic Kernel integration | Yes |
-| Agno | Minimal-code agents | Fastest setup, model-agnostic | Yes |
+| Framework | Version | Model | Notes |
+|-----------|---------|-------|-------|
+| LangGraph | 1.2.16 | StateGraph + Functional API | Durable execution, interrupts; deploy with LangSmith Deployment |
+| LangChain `create_agent` | `langchain` 1.4.6 | Agent loop on LangGraph | Replaces `langgraph.prebuilt.create_react_agent`; middleware |
+| Claude Agent SDK | `claude-agent-sdk` 0.2.168 | Claude Code harness as a library | Built-in Read/Edit/Bash/Grep tools, subagents, hooks, MCP |
+| OpenAI Agents SDK | `openai-agents` 0.24.0 (JS: `@openai/agents`) | Handoffs | Guardrails, tracing, sessions, MCP |
+| Google ADK | `google-adk` 2.12.0 | ADK 2.0 | Python, TypeScript (GA), Go, Java |
+| Pydantic AI | `pydantic-ai` 2.57.0 | Typed agent loop | Durable execution (Temporal, DBOS, Prefect) |
+| Microsoft Agent Framework | `agent-framework` 1.22.0 | Multi-agent workflows | Successor to AutoGen (`microsoft/autogen` is archived); Python, .NET |
+| CrewAI | 1.15.28 | Role-based crews | MCP via the `mcps` field on agents |
+| Databricks Agent Bricks | platform | Agent Runtime + `DurableAgentServer` | Runs any of the above; memory on Lakebase, MLflow tracing |
 
-## The Pattern: LangGraph Multi-Agent
+## The Pattern: LangGraph Supervisor
 
 ```python
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langchain.chat_models import init_chat_model
 
-# Specialized agents as graph nodes
-researcher_model = init_chat_model("claude-sonnet-4-6", temperature=0)
-writer_model = init_chat_model("claude-sonnet-4-6", temperature=0.3)
+model = init_chat_model("claude-sonnet-5-5")   # no temperature: current Claude models reject it
 
 def researcher(state: MessagesState):
-    """Research agent with search tools."""
-    return {"messages": [researcher_model.invoke(state["messages"])]}
+    return {"messages": [model.invoke(state["messages"])]}
 
 def writer(state: MessagesState):
-    """Writing agent -- synthesizes research into content."""
-    return {"messages": [writer_model.invoke(state["messages"])]}
+    return {"messages": [model.invoke(state["messages"])]}
 
-def router(state: MessagesState) -> str:
-    """Supervisor decides next agent based on last message."""
-    last = state["messages"][-1]
-    if "RESEARCH_COMPLETE" in last.content:
-        return "writer"
-    return "researcher"
+def route(state: MessagesState) -> str:
+    return "writer" if "RESEARCH_COMPLETE" in state["messages"][-1].text else "researcher"
 
-# Build the multi-agent graph
 graph = StateGraph(MessagesState)
 graph.add_node("researcher", researcher)
 graph.add_node("writer", writer)
 graph.add_edge(START, "researcher")
-graph.add_conditional_edges("researcher", router, ["writer", "researcher"])
+graph.add_conditional_edges("researcher", route, ["writer", "researcher"])
 graph.add_edge("writer", END)
-agent = graph.compile()
+app = graph.compile()
 ```
 
-## The Pattern: Claude Agent SDK
+## The Pattern: Claude Agent SDK with a Subagent
 
 ```python
-# Claude Agent SDK -- packages Claude Code capabilities as a library
-from claude_agent_sdk import Agent, Tool
+import asyncio
+from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, ResultMessage, query
 
-agent = Agent(
-    model="claude-sonnet-4-6",
-    tools=[Tool.computer_use(), Tool.bash(), Tool.file_editor()],
-    system_prompt="You are a code review specialist.",
-    max_turns=10,
-)
-# Agent loop handles tool calling, retries, and context management
-result = await agent.run("Review the PR at https://github.com/org/repo/pull/42")
+async def main() -> None:
+    options = ClaudeAgentOptions(
+        system_prompt="You review pull requests for correctness and report issues with file:line.",
+        allowed_tools=["Read", "Grep", "Glob"],        # auto-approved; others follow permission_mode
+        permission_mode="default",
+        max_turns=10,
+        agents={"test-runner": AgentDefinition(
+            description="Runs the test suite and summarizes failures",
+            prompt="Run the tests and report each failing case.",
+            tools=["Bash", "Read"], model="haiku")},
+    )
+    async for message in query(prompt="Review the current diff", options=options):
+        if isinstance(message, ResultMessage):
+            print(message.result)
+
+asyncio.run(main())
 ```
 
-## Quick Reference
+For multi-turn sessions use `ClaudeSDKClient`; for custom in-process tools use `@tool` + `create_sdk_mcp_server()` and pass
+them through `ClaudeAgentOptions(mcp_servers=...)` with `allowed_tools=["mcp__<server>__<tool>"]`.
 
-| Topology | Latency | Cost | Fault Tolerance | Use Case |
-|----------|---------|------|-----------------|----------|
-| Sequential | High | Low | Low | Step-by-step workflows |
-| Concurrent | Low | High | Medium | Parallel analysis |
-| Hub-and-Spoke | Medium | Medium | Medium | Centralized control |
-| Mesh | Medium | High | High | Resilient systems |
-| Supervisor | Variable | Medium | Medium | Multi-agent routing |
-| Plan-and-Execute | Variable | Low | Medium | Cost-optimized pipelines |
+## Four Ways to Build a Claude Agent
 
-## Cost Optimization: Plan-and-Execute
+| Approach | You write | Harness | Deployment |
+|----------|-----------|---------|------------|
+| Manual loop (`anthropic`) | The `while stop_reason == "tool_use"` loop | You | You |
+| Tool Runner (`client.beta.messages.tool_runner`) | Tool functions | SDK | You |
+| Claude Agent SDK | Prompt + options | Claude Code harness | You (or Agent Bricks Agent Runtime) |
+| Managed Agents (beta) | Agent config + tool results | Anthropic | Anthropic (per-session sandbox) |
 
-```python
-# Frontier model plans, cheaper models execute
-# Claude Opus 4.6 plans -> Sonnet 4.6 or Haiku executes
-# Result: ~70-90% cost reduction vs. frontier-for-everything
-plan_agent = Agent(model="claude-opus-4-6", role="planner")
-exec_agents = {
-    "search": Agent(model="claude-sonnet-4-6", role="researcher", tools=[web_search]),
-    "write": Agent(model="claude-sonnet-4-6", role="writer"),
-}
-```
+## Cost: Tiering vs One Model at Lower Effort
+
+| Strategy | When it wins |
+|----------|--------------|
+| One capable model, `effort` tuned per route | Default first try: lower effort on current models often matches older models at high effort, and one model keeps one prompt-cache namespace |
+| Planner (Opus 5.5) + workers (Sonnet 5.5 / Haiku 5.5) | Fan-out work dominated by reading or simple steps; measure cost per completed task, not per request |
 
 ## Common Mistakes
 
 ### Wrong
+
 ```python
-# Single monolithic agent doing everything
-agent = Agent(
-    system_prompt="You are an expert at research, writing, coding, review...",
-    tools=[search, write, code, review, deploy, monitor],  # too many tools
-)
+# One agent with every tool and an "expert at everything" prompt
+agent = create_agent(model="claude-opus-5-5", tools=ALL_50_TOOLS,
+                     system_prompt="You are an expert at research, coding, review, deploy...")
 ```
 
 ### Correct
+
 ```python
-# Specialized agents with clear responsibilities and model tiering
-researcher = Agent(model="claude-sonnet-4-6", tools=[web_search, doc_search])
-writer = Agent(model="claude-sonnet-4-6", tools=[])
-reviewer = Agent(model="claude-opus-4-6", tools=[])  # frontier for quality
+from langchain.agents import create_agent
+
+researcher = create_agent(model="claude-sonnet-5-5", tools=[web_search, doc_search],
+                          system_prompt="Find and cite sources for the question.")
+reviewer = create_agent(model="claude-opus-5-5", tools=[],
+                        system_prompt="Check the draft against the cited sources.")
 ```
 
 ## Related
 
 - [State Machines](../concepts/state-machines.md)
 - [Tool Calling](../concepts/tool-calling.md)
+- [Claude API Surface](../concepts/anthropic-api-surface.md)
+- [Databricks Agent Platform](../concepts/databricks-agent-platform.md)
 - [Agentic Workflow Pattern](../patterns/agentic-workflow.md)
+
+## Sources
+
+- https://code.claude.com/docs/en/agent-sdk/python
+- https://docs.langchain.com/oss/python/releases/langchain-v1 ; https://docs.langchain.com/oss/python/migrate/langchain-v1 (`.text` is a property)
+- https://docs.langchain.com/oss/python/langgraph/overview
+- https://openai.github.io/openai-agents-python/ ; https://github.com/openai/openai-agents-js
+- https://google.github.io/adk-docs/
+- https://ai.pydantic.dev/
+- https://github.com/microsoft/agent-framework ; https://github.com/microsoft/autogen
+- https://docs.crewai.com/en/mcp/overview
+- https://docs.databricks.com/aws/en/agents/concepts/
+- https://pypi.org/ (versions for each package listed above)

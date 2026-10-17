@@ -37,6 +37,11 @@ color: green
 │  KNOWLEDGE RESOLUTION ORDER                                          │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
+│  0. RUNTIME TARGET                                                  │
+│     └─ Read: .claude/CLAUDE.md, pyproject.toml / requirements*.txt   │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/concepts/python-versions.md           │
+│     └─ Decide: Python + library versions of the deployment runtime   │
+│                                                                      │
 │  1. KB CHECK                                                        │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/ → Python patterns and idioms         │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/pydantic/ → Data validation patterns         │
@@ -44,7 +49,7 @@ color: green
 │                                                                      │
 │  2. CODEBASE ANALYSIS                                               │
 │     └─ Read: Existing code for style consistency                     │
-│     └─ Grep: Import patterns and project conventions                 │
+│     └─ Grep: Import patterns, logging helpers, project conventions   │
 │                                                                      │
 │  3. CONFIDENCE ASSIGNMENT                                            │
 │     ├─ KB pattern + existing code style  → 0.95 → Code directly    │
@@ -62,19 +67,31 @@ color: green
 - Dataclass-based data models (frozen, slots)
 - Generator pipelines for memory-efficient processing
 - Context managers for resource management
-- Structured logging with structlog
+- Logging through the project's existing logging helper if there is one; otherwise stdlib
+  `logging` (structlog 26.x is fine for services, but do not add it to notebook/cluster code
+  that already has a logging convention)
 
 ### Capability 2: Type-Safe Code
-- Full type hints (Python 3.10+ union syntax)
-- Pydantic models for validation boundaries
-- Generic types for reusable components
+- Language level = deployment runtime, not the newest Python. Example: Databricks Runtime 17.3
+  LTS runs Python 3.12.3 and pydantic 2.10.6, so no `except A, B:`, t-strings, `lazy import`,
+  `from typing import TypeIs/ReadOnly` (use `typing_extensions`), and no pydantic 2.11+ options
+  (`validate_by_name`) unless the job installs a newer pydantic
+- Full type hints: `X | None`, PEP 695 generics (`def f[T](...)`, 3.12+), `Self`
+- Pydantic models for validation boundaries; `StringConstraints` for string normalization
 - Protocol classes for duck typing
+- `datetime.now(UTC)`, never the deprecated naive `datetime.utcnow()`
 
 ### Capability 3: Parser Architecture
 - Generator-based file parsing
 - Dataclass records with validation
-- Error handling with specific exceptions
+- Error handling with specific exceptions (broad `except Exception` only at the outer boundary)
 - Test fixtures from sample data
+
+### Capability 4: Project Tooling
+- uv for environments, lockfile and PEP 735 `[dependency-groups]` (`uv add --group test pytest`)
+- ruff 0.17+ for lint and format, with `target-version` matching the runtime (e.g. `py312`)
+- mypy 2.x or pyright as the type checker; ty is beta -- optional, never a CI gate yet
+- Reference: `${CLAUDE_PLUGIN_ROOT}/kb/python/patterns/project-tooling.md`
 
 ---
 
@@ -86,8 +103,9 @@ color: green
 | Dataclasses | Preferred over dicts for structured data |
 | Generators | Use for large file/data processing |
 | Naming | snake_case functions, PascalCase classes |
-| Imports | stdlib → third-party → local (isort) |
+| Imports | stdlib → third-party → local (ruff `I` rules) |
 | Formatting | ruff format (88 char line) |
+| Target | `requires-python` / ruff `target-version` = deployment interpreter |
 
 ---
 

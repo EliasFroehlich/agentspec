@@ -1,115 +1,91 @@
 # Pydantic Quick Reference
 
-> Fast lookup tables. For code examples, see linked files.
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Fast lookup tables; code examples live in the linked files
+> **Confidence**: 0.95
+> **MCP Validated**: 2026-10-17
 
 ## Core Model Methods
 
 | Method | Input | Output | Notes |
 |--------|-------|--------|-------|
-| `Model(**data)` | kwargs | Model instance | Validates on creation |
-| `model_validate(obj)` | dict | Model instance | Parse dict into model |
-| `model_validate_json(json_str)` | str | Model instance | Parse JSON string |
-| `model_dump()` | -- | dict | Serialize to dict |
-| `model_dump_json()` | -- | str | Serialize to JSON |
-| `model_json_schema()` | -- | dict | Get JSON Schema |
-| `model_copy(update={})` | dict | Model instance | Clone with overrides |
+| `Model(**data)` / `model_validate(obj)` | kwargs / dict | instance | `strict=True` allowed per call |
+| `model_validate_json(s)` | str/bytes | instance | Bad JSON -> `ValidationError` (`json_invalid`) |
+| `model_dump()` / `model_dump_json()` | -- | dict / str | `exclude_none=True`, `by_alias=True` |
+| `model_json_schema()` | -- | dict | Feed to LLM prompts |
+| `model_copy(update={})` | dict | instance | `update` values are not validated |
 
 ## Field Type Patterns
 
 | Pattern | Syntax | Use Case |
 |---------|--------|----------|
-| Required | `name: str` | Field must be provided |
-| Optional | `name: Optional[str] = None` | Field can be missing |
-| Default | `name: str = "default"` | Has fallback value |
-| Constrained | `name: Annotated[str, Field(min_length=1)]` | With validation |
-| List | `items: list[Item]` | Collection of models |
-| Literal | `status: Literal["ok", "error"]` | Enum-like choices |
+| Required | `name: str` | Must be provided |
+| Optional | `name: str \| None = None` | May be missing (needs the `= None`) |
+| Constrained | `Annotated[int, Field(ge=1)]` | Numeric/length/pattern limits |
+| Normalized string | `Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]` | Not possible via `Field()` |
+| Literal / enum | `Literal["ok", "error"]` / `class C(StrEnum)` | Closed choice set |
+| Description | `Field(description="...")` | Avoid `Field(..., ...)` for required |
 
-## Validator Modes
+## Validators
 
 | Decorator | Mode | Receives | Use Case |
 |-----------|------|----------|----------|
-| `@field_validator` | `"before"` | Raw input | Coerce types |
-| `@field_validator` | `"after"` | Validated value | Post-validation logic |
-| `@field_validator` | `"wrap"` | value + handler | Control validation |
-| `@model_validator` | `"before"` | Raw dict | Pre-process all data |
-| `@model_validator` | `"after"` | Model instance | Cross-field validation |
+| `@field_validator` + `@classmethod` | `"after"` (default) / `"before"` / `"wrap"` | value | Field rules / coercion |
+| `@model_validator` | `"before"` | raw input | Pre-process payload |
+| `@model_validator` | `"after"` | instance, return `self` (`-> Self`) | Cross-field rules |
+| `Annotated[T, AfterValidator(fn)]` | -- | value | Reusable rule |
 
-## Computed Fields
+## Version-Gated Features
 
-| Pattern | Syntax | Notes |
-|---------|--------|-------|
-| Derived value | `@computed_field` + `@property` | Included in `model_dump()` and JSON schema |
-| Read-only in schema | Auto-marked `readOnly` | In serialization-mode schema |
-| Cached computed | `@computed_field` + `@cached_property` | Computed once, cached |
+| Feature | Min version | On DBR 17.3 LTS (2.10.6) |
+|---------|-------------|--------------------------|
+| `from_json(..., allow_partial=True)` | 2.7 | yes |
+| `validate_by_name` / `validate_by_alias` / `serialize_by_alias` | 2.11 | no -> `populate_by_name=True` |
+| `model_dump(exclude_computed_fields=True)` | 2.12 | no |
+| `MISSING` sentinel | 2.12 experimental, 2.14 stable | no |
+| Python 3.15 / `TypeForm` support | 2.14 | no |
 
-## TypeAdapter (Non-BaseModel Validation)
+## Unions and TypeAdapter
 
-| Method | Input | Output |
-|--------|-------|--------|
-| `TypeAdapter(list[int])` | type | adapter instance |
-| `adapter.validate_python(data)` | Python object | validated value |
-| `adapter.validate_json(json_str)` | JSON string | validated value |
-| `adapter.json_schema()` | -- | JSON Schema dict |
-| `adapter.dump_python(value)` | validated value | Python object |
-| `adapter.dump_json(value)` | validated value | JSON bytes |
-
-## Discriminated Unions
-
-| Pattern | Syntax | Use Case |
-|---------|--------|----------|
-| Tagged union | `Field(discriminator='type')` | Polymorphic models with type tag |
-| Literal discriminator | `type: Literal['cat']` on each variant | Efficient variant selection |
-| Union mode | `union_mode='left_to_right'` | Explicit validation order |
-| Smart mode | Default for untagged unions | Pydantic finds best match |
+| Pattern | Syntax |
+|---------|--------|
+| Tagged union | `source: A \| B = Field(discriminator="kind")` |
+| List of tagged variants | `list[Annotated[A \| B, Field(discriminator="kind")]]` |
+| Non-model validation | `TypeAdapter(list[int]).validate_json("[1, 2]")` |
 
 ## Pydantic Settings (`pydantic-settings`)
 
 | Feature | Syntax | Notes |
 |---------|--------|-------|
-| Env vars | `class S(BaseSettings):` | Auto-loads from environment |
-| Prefix | `env_prefix='APP_'` | Namespace env vars |
-| .env file | `env_file='.env'` | Load from dotenv file |
-| Multiple .env | `env_file=('.env', '.env.prod')` | Later files override |
-| TOML config | `toml_file='config.toml'` | Requires `settings_customise_sources` |
-| YAML config | `yaml_file='config.yaml'` | Requires `YamlConfigSettingsSource` |
-| Nested | Use `BaseModel` sub-models | Maps `DB_HOST` to `db.host` |
-
-## Decision Matrix
-
-| Use Case | Choose |
-|----------|--------|
-| Parse LLM JSON output | `model_validate_json()` |
-| Define extraction schema | BaseModel + Field descriptions |
-| Cross-field validation | `@model_validator(mode="after")` |
-| Type coercion before validation | `@field_validator(mode="before")` |
-| Reusable constraint | `Annotated[type, AfterValidator(fn)]` |
-| Generate prompt instructions | `Model.model_json_schema()` |
-| Derived/calculated field | `@computed_field` + `@property` |
-| Validate non-model types | `TypeAdapter(list[int])` |
-| Polymorphic JSON parsing | Discriminated union with `Literal` tag |
-| App config from env/files | `BaseSettings` from `pydantic-settings` |
+| Env vars + prefix | `SettingsConfigDict(env_prefix="APP_")` | `APP_TIMEOUT` -> `timeout` |
+| .env files | `env_file=(".env", ".env.prod")` | Later files override |
+| Nested models | `env_nested_delimiter="__"` | `APP_DB__HOST` -> `db.host`; `APP_DB_HOST` is ignored |
+| TOML / YAML | `toml_file=` / `yaml_file=` | Also override `settings_customise_sources` |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| `name: Optional[str]` (no default) | `name: Optional[str] = None` |
-| `@validator` (v1 syntax) | `@field_validator` (v2 syntax) |
-| `.dict()` / `.json()` (v1) | `.model_dump()` / `.model_dump_json()` (v2) |
-| `Config` inner class (v1) | `model_config = ConfigDict(...)` (v2) |
-| Trust raw LLM output | Always validate with `model_validate_json()` |
-| `parse_obj_as()` (v1) | `TypeAdapter(type).validate_python()` (v2) |
-| `schema_of()` (v1) | `TypeAdapter(type).json_schema()` (v2) |
-| Untagged union (slow) | Discriminated union with `Literal` tag (fast) |
-| Manual env parsing | `BaseSettings` from `pydantic-settings` |
+| `Field(strip_whitespace=True)` | `StringConstraints(strip_whitespace=True)` (Field only warns, never strips) |
+| `name: str \| None` with no default | `name: str \| None = None` |
+| `Field(discriminator=...)` on a `list[...]` field | Discriminator on the union inside the list |
+| `-> "MyModel"` in after-validators | `-> Self` |
+| `populate_by_name=True` on 2.11+ | `validate_by_name=True` (+ `validate_by_alias=True`) |
+| `@validator`, `.dict()`, inner `class Config`, `parse_obj_as()` (v1) | `@field_validator`, `.model_dump()`, `model_config`, `TypeAdapter` |
+| Catch `json.JSONDecodeError` around `model_validate_json` | Catch `ValidationError` (type `json_invalid`) |
+| `assert` in validators | `raise ValueError(...)` (`assert` is skipped under `-O`) |
 
 ## Related Documentation
 
 | Topic | Path |
 |-------|------|
-| BaseModel basics | `concepts/base-model.md` |
+| Strict mode and config | `concepts/strict-and-config.md` |
 | Validators deep dive | `concepts/validators.md` |
 | LLM output parsing | `patterns/llm-output-validation.md` |
 | Full Index | `index.md` |
+
+## Sources
+
+- https://docs.pydantic.dev/latest/api/types/
+- https://docs.pydantic.dev/latest/concepts/unions/
+- https://docs.pydantic.dev/latest/concepts/pydantic_settings/
+- https://pydantic.dev/articles/pydantic-v2-14-release

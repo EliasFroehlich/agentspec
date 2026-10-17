@@ -1,7 +1,8 @@
 # Dynamic Task Mapping
 
-> **Purpose**: Runtime task generation with expand(), partial(), TaskGroups; fan-out/fan-in patterns for variable workloads
-> **MCP Validated**: 2026-03-26 | Compatible with Airflow 2.3+ and 3.0+
+> **Purpose**: Runtime task generation with expand(), partial(), expand_kwargs(), mapped task groups and XComArg map/zip/concat; fan-out/fan-in patterns
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -17,8 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from airflow.decorators import dag, task
-from airflow.utils.task_group import TaskGroup
+from airflow.sdk import TaskGroup, dag, task
 
 
 @dag(
@@ -87,7 +87,7 @@ def dynamic_mapping():
 
     summary = aggregate(results=loaded)
 
-    # --- 5. Mapped task with zip (cross-product alternative) ---
+    # --- 5. expand_kwargs with pre-zipped pairs (expand(a=[..], b=[..]) would build the cross product) ---
     @task
     def merge_datasets(table: str, partition: str) -> str:
         return f"Merged {table}/{partition}"
@@ -108,30 +108,49 @@ dynamic_mapping()
 
 ## Configuration
 
-| Feature | Minimum Version | Notes |
-|---------|----------------|-------|
-| `expand()` | Airflow 2.3+ | Replaces deprecated `map()` |
-| `partial()` | Airflow 2.3+ | Pin shared kwargs before expand |
-| `expand_kwargs()` | Airflow 2.3+ | Zip-style multi-param mapping |
-| `TaskGroup` + mapping | Airflow 2.4+ | Nested groups with dynamic tasks |
-| Max mapped tasks | `max_map_length` in airflow.cfg | Default 1024; raise for large fans |
+All features below are available in every Airflow 3.x release (they were introduced during 2.x).
+
+| Feature | Notes |
+|---------|-------|
+| `expand()` | Creates one task instance per item at runtime; only lists and dicts can be expanded |
+| `partial()` | Pins shared kwargs; `task_id`, `pool`, `queue` and most BaseOperator args must go here |
+| `expand_kwargs()` | Expands over a list of kwargs dicts (zip-style multi-param mapping) |
+| `@task_group` + `expand()` | Mapped task group; code in the group function cannot read the runtime value |
+| `XComArg.map(fn)` | Plain-function transform applied as pre-processing of the downstream task; not a task, and not a predecessor of `expand()` |
+| `XComArg.zip(...)` / `.concat(...)` | Combine upstream outputs before expanding (`concat` since 2.10) |
+| `map_index_template` | Human-readable names for mapped instances in the UI |
+| `[core] max_map_length` | Default 1024; an upstream that pushes a longer list fails |
+| `max_active_tis_per_dag` | Caps how many mapped instances run at once |
 
 ## Example Usage
 
 ```python
-# Minimal dynamic mapping — process S3 partitions at runtime
-@task
-def list_partitions() -> list[str]:
-    from airflow.providers.amazon.aws.hooks.s3 import S3Hook
-    hook = S3Hook(aws_conn_id="aws_default")
-    keys = hook.list_keys(bucket_name="lake", prefix="raw/orders/")
-    return [k for k in keys if k.endswith(".parquet")]
+# Minimal dynamic mapping: process S3 objects found at runtime
+from datetime import datetime
 
-@task
-def transform(partition_key: str) -> str:
-    return f"Transformed {partition_key}"
+from airflow.sdk import dag, task
 
-transform.expand(partition_key=list_partitions())
+
+def to_uri(key: str) -> str:            # plain function, NOT a @task
+    return f"s3://my-bucket/{key}"
+
+
+@dag(schedule="@daily", start_date=datetime(2026, 1, 1))
+def process_partitions():
+    @task
+    def list_partitions() -> list[str]:
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+        return S3Hook(aws_conn_id="aws_default").list_keys(bucket_name="my-bucket", prefix="raw/orders/")
+
+    @task
+    def transform(partition_uri: str) -> str:
+        return f"Transformed {partition_uri}"
+
+    # .map() reshapes each item right before the downstream task expands over it
+    transform.expand(partition_uri=list_partitions().map(to_uri))
+
+
+process_partitions()
 ```
 
 ## See Also
@@ -140,3 +159,11 @@ transform.expand(partition_key=list_partitions())
 - [task-dependencies](../concepts/task-dependencies.md)
 - [dag-factory](../patterns/dag-factory.md)
 - [error-handling](../patterns/error-handling.md)
+
+## Sources
+
+- https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html
+- https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html (`max_map_length`)
+- https://airflow.apache.org/docs/apache-airflow/stable/release_notes.html (2.10.0 `concat`)
+- https://airflow.apache.org/docs/task-sdk/stable/api.html
+- https://airflow.apache.org/docs/apache-airflow/stable/installation/upgrading_to_airflow3.html
