@@ -2,14 +2,14 @@
 
 > **Purpose**: unittest.mock, monkeypatch, and patching strategies for test isolation
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
 Mocking replaces real dependencies with controlled doubles so tests run in isolation. Python
 provides `unittest.mock` (Mock, MagicMock, patch) in the standard library, and pytest adds
-`monkeypatch` for simpler attribute/env patching. The critical rule: always patch where the
-name is **looked up**, not where it is **defined**.
+`monkeypatch` for simpler attribute/env patching; the pytest-mock plugin adds a `mocker` fixture.
+The critical rule: always patch where the name is **looked up**, not where it is **defined**.
 
 ## The Pattern
 
@@ -80,18 +80,9 @@ from myapp.utils import fetch_data  # <-- imported here
 mock_fn = Mock()
 mock_fn("arg1", key="val")
 
-# Verify calls
-mock_fn.assert_called()
-mock_fn.assert_called_once()
-mock_fn.assert_called_with("arg1", key="val")
-mock_fn.assert_called_once_with("arg1", key="val")
-
-# Check call count and args
+mock_fn.assert_called_once_with("arg1", key="val")   # also: assert_called(), assert_called_with()
 assert mock_fn.call_count == 1
-assert mock_fn.call_args == (("arg1",), {"key": "val"})
-assert mock_fn.call_args_list == [
-    (("arg1",), {"key": "val"})
-]
+assert mock_fn.call_args == call("arg1", key="val")     # from unittest.mock import call
 ```
 
 ## monkeypatch Patterns
@@ -107,6 +98,20 @@ def test_setattr(monkeypatch):
 def test_dict_item(monkeypatch):
     monkeypatch.setitem(config_dict, "retries", 0)
 ```
+
+## pytest-mock (`mocker` fixture)
+
+```python
+def test_service_with_mocker(mocker):
+    """Same API as mock.patch; every patch is undone automatically after the test."""
+    fake_api = mocker.patch("myapp.service.external_api_call", return_value={"data": [1]})
+    spy = mocker.spy(myapp.service, "transform")       # real call, but recorded
+    assert myapp.service.process_data() == [1]
+    fake_api.assert_called_once()
+    assert spy.call_count == 1
+```
+
+Install with `uv add --group test pytest-mock`; do not use `mocker.patch` as a context manager (it warns).
 
 ## Common Mistakes
 
@@ -137,3 +142,9 @@ def test_good(mock_req):
 - [Fixtures](../concepts/fixtures.md)
 - [Unit Test Patterns](../patterns/unit-test-patterns.md)
 - [Integration Tests](../patterns/integration-tests.md)
+
+## Sources
+
+- https://docs.python.org/3/library/unittest.mock.html
+- https://docs.pytest.org/en/stable/how-to/monkeypatch.html
+- https://pytest-mock.readthedocs.io/en/latest/usage.html

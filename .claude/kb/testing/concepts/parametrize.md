@@ -2,7 +2,7 @@
 
 > **Purpose**: Data-driven testing with @pytest.mark.parametrize for multiple input/output combos
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -73,9 +73,8 @@ def test_validate_input(value, should_raise):
 @pytest.mark.parametrize("x", [1, 2, 3])
 @pytest.mark.parametrize("y", [10, 20])
 def test_multiply(x, y):
-    """Generates 6 tests: (1,10), (1,20), (2,10), (2,20), (3,10), (3,20)"""
-    result = x * y
-    assert result == x * y
+    """Generates 3 x 2 = 6 tests; IDs are test_multiply[10-1], [10-2], [10-3], [20-1], ..."""
+    assert x * y == y * x
 ```
 
 ## Named Test Cases with IDs
@@ -102,7 +101,7 @@ def test_multiply(x, y):
         False,
         id="empty-payload"
     ),
-], ids=str)
+])                                     # pytest.param(id=...) already names each case
 def test_validate_invoice(data, expected):
     assert is_valid_invoice(data) == expected
 ```
@@ -140,3 +139,8 @@ def test_parse_int(input_str, expected):
 - [pytest Basics](../concepts/pytest-basics.md)
 - [Unit Test Patterns](../patterns/unit-test-patterns.md)
 - [Fixture Factories](../patterns/fixture-factories.md)
+
+## Sources
+
+- https://docs.pytest.org/en/stable/how-to/parametrize.html
+- https://docs.pytest.org/en/stable/reference/reference.html

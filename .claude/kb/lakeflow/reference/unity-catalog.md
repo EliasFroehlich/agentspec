@@ -1,481 +1,174 @@
-# Unity Catalog Integration
+# Unity Catalog with Lakeflow Pipelines
 
-> Source: https://docs.databricks.com/aws/en/dlt/unity-catalog
+> **Purpose**: Publishing targets (default publishing mode), permissions, compute requirements, sources, governance (grants, row filters, column masks), DML, inactive tables and limitations
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Overview
+---
 
-Unity Catalog provides centralized governance, security, and discovery for all data assets in Lakeflow Declarative Pipelines.
+## 1. Publishing model
 
-## Configuration
+Unity Catalog is the default for new pipelines. In the **default publishing mode** (all pipelines
+created since 2025-02-05; older ones may use the legacy `LIVE` mode):
 
-### Enable Unity Catalog
-
-When creating a pipeline:
-1. Select **"Unity Catalog"** under storage options
-2. Choose a **catalog** for table storage
-3. Choose a **schema** within the catalog
-4. Ensure compute uses **standard access mode**
-
-### Pipeline Setting
+- `catalog` + `schema` in the settings are only the **defaults** for unqualified names.
+- Any dataset can be written to another catalog/schema with a fully qualified name, or after
+  `USE CATALOG` / `USE SCHEMA` in a source file (scope: rest of that file).
+- The `LIVE` keyword is ignored.
+- Writing to a schema that does not exist creates it (needs `CREATE SCHEMA`); reading a missing
+  dataset fails the update.
 
 ```json
-{
-  "catalog": "production",
-  "target": "production.sales_schema",
-  "unity_catalog_enabled": true
-}
+{ "name": "sales_pipeline", "catalog": "main", "schema": "sales", "serverless": true }
 ```
 
-### ⚠️ IMPORTANT: Catalog and Schema Configuration
-
-**The `@dlt.table()` decorator does NOT support `catalog` or `schema` parameters.**
-
-❌ **INCORRECT - This will cause TypeError:**
 ```python
-@dlt.table(
-    name="silver_users",
-    catalog="semana",  # NOT SUPPORTED
-    schema="default"    # NOT SUPPORTED
+from pyspark import pipelines as dp
+
+@dp.materialized_view(name="main.reporting.regional_sales")   # outside the default schema
+def regional_sales():
+    return spark.read.table("partners")                          # resolves to main.sales.partners
+```
+
+```sql
+CREATE OR REFRESH MATERIALIZED VIEW main.reporting.regional_sales AS SELECT * FROM partners;
+USE CATALOG main;
+USE SCHEMA reporting;
+```
+
+There is no `unity_catalog_enabled` flag: setting `catalog` enables UC. The legacy `target` field
+held only a schema name; use `schema`.
+
+## 2. Permissions
+
+| To | Privileges (for the run-as identity) |
+|----|--------------------------------------|
+| Publish streaming tables | `USE CATALOG` on the catalog; `USE SCHEMA` + `CREATE TABLE` on the schema |
+| Publish materialized views | `USE CATALOG`; `USE SCHEMA` + `CREATE MATERIALIZED VIEW` |
+| Create schemas | `USE CATALOG` + `CREATE SCHEMA` |
+| Update existing tables | `MODIFY` |
+| Let others read | `GRANT SELECT ON TABLE <cat>.<sch>.<t> TO <principal>` |
+
+```sql
+GRANT USE CATALOG ON CATALOG main TO `etl-service-principal`;
+GRANT USE SCHEMA, CREATE TABLE, CREATE MATERIALIZED VIEW ON SCHEMA main.sales TO `etl-service-principal`;
+GRANT SELECT ON TABLE main.sales.daily_revenue TO `analysts`;
+```
+
+By default only the pipeline owner can query the pipeline's datasets; `MANAGE` is propagated to
+MVs/STs (Jan 2026). Ownership of MVs/STs can be changed to a service principal with
+`ALTER MATERIALIZED VIEW | STREAMING TABLE ... SET OWNER TO` (May 2026); a group owner must be set
+in the UI. Changing the run-as identity also changes the owner of published tables.
+
+## 3. Compute
+
+| Purpose | Requirement |
+|---------|-------------|
+| Run a UC pipeline | Standard access mode (dedicated is not supported) |
+| Query its MVs/STs | SQL warehouses; standard access mode DBR 13.3 LTS+; dedicated DBR 15.4+ with fine-grained access control (serverless enabled); dedicated 13.3-15.3 only for the table owner |
+| DML on streaming tables | Shared/standard UC cluster or SQL warehouse, DBR 13.3 LTS+ |
+
+## 4. Sources a UC pipeline can read
+
+- UC managed and external tables, views, MVs and STs; Hive metastore tables (`hive_metastore` or an
+  HMS federation catalog).
+- Files via Auto Loader / `read_files()` from UC volumes and external locations.
+- Apache Kafka and Amazon Kinesis (plus other message buses documented for pipelines).
+- Change feeds: `spark.readStream.option("readChangeFeed", "true").table(...)`; for sources with
+  updates/deletes use `skipChangeCommits` or read them in a materialized view.
+
+## 5. Governance on pipeline tables
+
+- Row filters and column masks are declared in the dataset definition and managed through
+  `CREATE OR REFRESH` (not separate `ALTER TABLE` statements). During refresh the functions run with
+  the pipeline owner's identity; at query time with the reader's identity. Since Mar 2026 updates
+  preserve these policies.
+
+```sql
+CREATE OR REFRESH MATERIALIZED VIEW main.sales.customers_secure (
+  customer_id BIGINT,
+  region STRING,
+  ssn STRING MASK main.sec.mask_ssn USING COLUMNS (region)
 )
-def silver_users():
-    return dlt.read_stream("semana.default.bronze_users")
+WITH ROW FILTER main.sec.region_filter ON (region)
+AS SELECT customer_id, region, ssn FROM main.crm.customers;
 ```
 
-✅ **CORRECT - Specify catalog/schema at pipeline configuration level:**
 ```python
-@dlt.table(
-    name="silver_users"
+@dp.materialized_view(
+    schema="customer_id BIGINT, region STRING, ssn STRING MASK main.sec.mask_ssn USING COLUMNS (region)",
+    row_filter="ROW FILTER main.sec.region_filter ON (region)",
 )
-def silver_users():
-    # Read from fully qualified table name
-    return dlt.read_stream("semana.default.bronze_users")
+def customers_secure():
+    return spark.read.table("main.crm.customers").select("customer_id", "region", "ssn")
 ```
 
-**Pipeline Configuration (UI or JSON):**
-- Set `catalog = "semana"`
-- Set `target = "semana.default"`
-- All tables created by the pipeline will be written to `semana.default.*`
+- Lineage for pipeline tables is shown in Catalog Explorer, linking to the producing pipeline.
+- Comments and RLS/CLM can also be set with `ALTER` on MVs/STs (2025.29); values set in source code
+  win on refresh.
+- Do not share an MV's underlying storage with untrusted consumers: backing files can contain
+  upstream values not visible in the MV schema.
 
-**Key Points:**
-- Use fully qualified names when reading: `catalog.schema.table`
-- Table output location is controlled by pipeline configuration, NOT decorator parameters
-- All tables in a single pipeline write to the same catalog.schema (unless using Direct Publishing Mode)
+## 6. DML on streaming tables
 
-## Permission Requirements
-
-### Catalog-Level Permissions
+`INSERT`, `UPDATE`, `DELETE`, `MERGE` are allowed on streaming tables published to UC (for example
+GDPR deletes). DML that changes the table schema is not. Downstream streams reading a modified
+streaming table need `skipChangeCommits`.
 
 ```sql
--- Required for all pipelines
-GRANT USE CATALOG ON CATALOG production TO `service_principal`;
+DELETE FROM main.sales.customers_bronze WHERE customer_id = 123;
 ```
 
-### Schema-Level Permissions for Materialized Views
+## 7. Inactive tables and deleting pipelines
+
+- Removing a dataset from the code marks its table **inactive** on the next update; it stays
+  queryable but is no longer refreshed. `DROP` to clean up; `UNDROP` within 7 days.
+- `"pipelines.dropInactiveTables": "true"` restores the old behavior of removing inactive entries.
+- Changing the default catalog/schema without fully qualified names creates new tables in the new
+  location and marks the old ones inactive.
+- Deleting a pipeline in the default publishing mode **retains** its MVs, STs and views by default
+  (queryable, not updatable until moved into another pipeline). `DELETE
+  /api/2.0/pipelines/{id}?cascade=true` deletes them too; in bundles, `cascade_on_destroy: false`
+  keeps datasets on `bundle destroy`.
+- Move a table to another pipeline (DBR 16.3+ to run the command; 17.2+ across workspaces):
 
 ```sql
--- Create materialized views
-GRANT CREATE MATERIALIZED VIEW ON SCHEMA production.sales TO `service_principal`;
-GRANT USE SCHEMA ON SCHEMA production.sales TO `service_principal`;
+ALTER STREAMING TABLE main.sales.orders
+  SET TBLPROPERTIES ("pipelines.pipelineId" = "<destination-pipeline-id>");
 ```
 
-### Schema-Level Permissions for Streaming Tables
-
-```sql
--- Create streaming tables
-GRANT CREATE TABLE ON SCHEMA production.sales TO `service_principal`;
-GRANT USE SCHEMA ON SCHEMA production.sales TO `service_principal`;
-```
-
-### Modifying Existing Tables
-
-```sql
--- Modify tables and views
-GRANT MODIFY ON TABLE production.sales.customers TO `service_principal`;
-```
-
-## Data Ingestion Capabilities
-
-### Read from Unity Catalog Tables
-
-```python
-@dlt.table()
-def transformed_data():
-    return spark.read.table("catalog.schema.source_table")
-```
-
-```sql
-CREATE OR REFRESH MATERIALIZED VIEW transformed_data
-AS SELECT * FROM catalog.schema.source_table
-```
-
-### Read from Hive Metastore Tables
-
-```python
-@dlt.table()
-def from_hive():
-    return spark.read.table("hive_metastore.default.legacy_table")
-```
-
-### Auto Loader
-
-```python
-@dlt.table()
-def cloud_data():
-    return (
-        spark.readStream
-        .format("cloudFiles")
-        .option("cloudFiles.format", "json")
-        .load("s3://bucket/data/")
-    )
-```
-
-### Stream Changes from Tables
-
-```python
-@dlt.table()
-def incremental_changes():
-    return (
-        spark.readStream
-        .option("readChangeFeed", "true")
-        .table("catalog.schema.source_table")
-    )
-```
-
-### Apache Kafka
-
-```python
-@dlt.table()
-def kafka_stream():
-    return (
-        spark.readStream
-        .format("kafka")
-        .option("kafka.bootstrap.servers", "broker:9092")
-        .option("subscribe", "topic")
-        .load()
-    )
-```
-
-### Amazon Kinesis
-
-```python
-@dlt.table()
-def kinesis_stream():
-    return (
-        spark.readStream
-        .format("kinesis")
-        .option("streamName", "my-stream")
-        .option("region", "us-west-2")
-        .load()
-    )
-```
-
-## Governance Features
-
-### Lineage Tracking
-
-Unity Catalog **Catalog Explorer** shows:
-- **Upstream dependencies** - What data sources feed into tables
-- **Downstream consumers** - What queries/dashboards use tables
-- **Column-level lineage** - How columns transform through pipeline
-- **Cross-pipeline lineage** - Dependencies across pipelines
-
-**Access lineage:**
-1. Open Catalog Explorer
-2. Navigate to table
-3. Click "Lineage" tab
-
-### Access Control
-
-#### Grant Table Access
-
-```sql
--- Grant SELECT to analysts
-GRANT SELECT ON TABLE production.sales.customers TO `analysts_group`;
-
--- Grant ALL to data engineers
-GRANT ALL PRIVILEGES ON TABLE production.sales.customers TO `data_engineers`;
-```
-
-#### Revoke Access
-
-```sql
-REVOKE SELECT ON TABLE production.sales.customers FROM `analysts_group`;
-```
-
-### Row Filters (Public Preview)
-
-Restrict row-level access based on user identity:
-
-```sql
-CREATE FUNCTION sales_filter()
-RETURN IF(IS_MEMBER('sales_team'), TRUE, region = current_user());
-
-ALTER TABLE production.sales.transactions
-SET ROW FILTER sales_filter ON (region);
-```
-
-### Column Masks (Public Preview)
-
-Mask sensitive data based on user permissions:
-
-```sql
-CREATE FUNCTION mask_ssn(ssn STRING)
-RETURN CASE
-  WHEN IS_MEMBER('admin') THEN ssn
-  ELSE 'XXX-XX-' || RIGHT(ssn, 4)
-END;
-
-ALTER TABLE production.sales.customers
-ALTER COLUMN ssn SET MASK mask_ssn;
-```
-
-## DML Statements on Streaming Tables
-
-Unity Catalog pipelines support DML operations on streaming tables:
-
-### INSERT
-
-```sql
-INSERT INTO production.sales.customers
-VALUES ('123', 'John Doe', 'john@example.com');
-```
-
-### UPDATE
-
-```sql
-UPDATE production.sales.customers
-SET email = 'newemail@example.com'
-WHERE customer_id = '123';
-```
-
-### DELETE
-
-```sql
-DELETE FROM production.sales.customers
-WHERE customer_id = '123';
-```
-
-### MERGE
-
-```sql
-MERGE INTO production.sales.customers target
-USING updates source
-ON target.customer_id = source.customer_id
-WHEN MATCHED THEN UPDATE SET *
-WHEN NOT MATCHED THEN INSERT *;
-```
-
-**Note:** DML statements on streaming tables are supported only in Unity Catalog pipelines.
-
-## Key Limitations
-
-### ❌ Not Supported
-
-1. **JAR Libraries**
-   - Cannot use custom JARs in Unity Catalog pipelines
-   - Use Python libraries instead
-
-2. **Schema Modifications on Streaming Tables**
-   - Cannot alter schema of streaming tables
-   - Recreate table if schema change needed
-
-3. **Materialized Views Outside Pipeline**
-   - Cannot query materialized views from outside original pipeline
-   - Use streaming tables for external access
-
-4. **Hive Metastore Pipeline Upgrades**
-   - Cannot upgrade existing Hive metastore pipelines to Unity Catalog
-   - Must create new Unity Catalog pipeline
-
-## Advanced Features
-
-### Inactive Table Recovery
-
-**Retention:** Inactive tables can be recovered within **7 days**
-
-```sql
--- Restore deleted table
-UNDROP TABLE production.sales.customers;
-```
-
-### Pipeline Deletion Behavior
-
-**Warning:** Pipeline deletion removes all associated tables
-
-**To preserve tables:**
-1. Export table definitions
-2. Recreate tables outside pipeline
-3. Copy data before deletion
-
-### Cross-Catalog References
-
-```python
-@dlt.table()
-def multi_catalog_join():
-    return (
-        spark.read.table("catalog1.schema.table1")
-        .join(
-            spark.read.table("catalog2.schema.table2"),
-            "id"
-        )
-    )
-```
-
-## Complete Example: Unity Catalog Pipeline
-
-### Python
-
-```python
-import dlt
-from pyspark.sql import functions as F
-
-# Read from Unity Catalog
-@dlt.table()
-def bronze_sales():
-    return spark.read.table("production.raw.sales_events")
-
-# Transform with governance
-@dlt.expect_or_drop("valid_amount", "amount > 0")
-@dlt.table(
-    comment="Cleaned sales data with quality checks",
-    table_properties={
-        "quality": "silver",
-        "owner": "data_team",
-        "pii": "false"
-    }
-)
-def silver_sales():
-    return (
-        dlt.read("bronze_sales")
-        .select(
-            "transaction_id",
-            "customer_id",
-            "amount",
-            F.current_timestamp().alias("processed_at")
-        )
-    )
-
-# Aggregate for analytics
-@dlt.table(
-    comment="Daily sales aggregations",
-    table_properties={
-        "quality": "gold",
-        "refresh_schedule": "daily"
-    }
-)
-def gold_daily_sales():
-    return (
-        spark.read.table("silver_sales")
-        .groupBy(F.date_trunc("day", "processed_at").alias("date"))
-        .agg(F.sum("amount").alias("total_sales"))
-    )
-```
-
-### SQL
-
-```sql
--- Read from Unity Catalog
-CREATE OR REFRESH STREAMING TABLE bronze_sales
-AS SELECT * FROM production.raw.sales_events
-
--- Transform with governance
-CREATE OR REFRESH STREAMING TABLE silver_sales(
-    CONSTRAINT valid_amount EXPECT (amount > 0) ON VIOLATION DROP ROW
-)
-COMMENT "Cleaned sales data with quality checks"
-TBLPROPERTIES (
-    "quality" = "silver",
-    "owner" = "data_team",
-    "pii" = "false"
-)
-AS SELECT
-    transaction_id,
-    customer_id,
-    amount,
-    CURRENT_TIMESTAMP() as processed_at
-FROM STREAM bronze_sales
-
--- Aggregate for analytics
-CREATE OR REFRESH MATERIALIZED VIEW gold_daily_sales
-COMMENT "Daily sales aggregations"
-TBLPROPERTIES (
-    "quality" = "gold",
-    "refresh_schedule" = "daily"
-)
-AS SELECT
-    DATE_TRUNC('day', processed_at) as date,
-    SUM(amount) as total_sales
-FROM silver_sales
-GROUP BY DATE_TRUNC('day', processed_at)
-```
-
-## Best Practices
-
-### ✅ DO
-
-1. **Use Unity Catalog by default** for all new pipelines
-2. **Configure service principals** for pipeline run-as identity
-3. **Apply least privilege** permissions
-4. **Document tables** with comments and properties
-5. **Use row filters and column masks** for sensitive data
-6. **Leverage lineage** for impact analysis
-7. **Tag tables** with metadata (owner, quality, PII, etc.)
-8. **Monitor access** with audit logs
-
-### ❌ DON'T
-
-1. **Don't grant excessive permissions**
-2. **Don't skip documentation**
-3. **Don't ignore lineage** information
-4. **Don't hardcode catalog names** (use parameters)
-5. **Don't delete pipelines** without backing up data
-6. **Don't use user accounts** for run-as (use service principals)
-
-## Troubleshooting
-
-### Permission Denied Errors
-
-**Check:**
-- `USE CATALOG` on target catalog
-- `USE SCHEMA` on target schema
-- `CREATE TABLE` or `CREATE MATERIALIZED VIEW` on schema
-- `MODIFY` on existing tables
-
-**Fix:**
-```sql
-GRANT USE CATALOG ON CATALOG production TO `pipeline_sp`;
-GRANT USE SCHEMA ON SCHEMA production.sales TO `pipeline_sp`;
-GRANT CREATE TABLE ON SCHEMA production.sales TO `pipeline_sp`;
-```
-
-### Lineage Not Showing
-
-**Possible causes:**
-- Pipeline not run yet
-- Lineage computation in progress
-- Cross-workspace references
-
-**Fix:**
-- Wait for pipeline completion
-- Refresh Catalog Explorer
-- Check cross-workspace permissions
-
-### Cannot Access from External Tools
-
-**Issue:** Materialized views not accessible outside pipeline
-
-**Solution:**
-- Use streaming tables instead
-- Copy data to regular Delta tables
-- Use `sink` API for external access
-
-## Security Recommendations
-
-1. **Use service principals** for pipeline execution
-2. **Enable audit logging** for compliance
-3. **Apply row-level security** for sensitive data
-4. **Mask PII columns** with column masks
-5. **Review permissions** regularly
-6. **Monitor access patterns** in audit logs
-7. **Use separate catalogs** for dev/staging/production
-8. **Encrypt data** at rest and in transit
+## 8. External (non-Databricks) access
+
+Off by default. External data access: DBR 17.3+, pipeline configuration
+`pipelines.externalMetadata.enabled = true` (or table property for standalone objects), clients on
+Delta 4.0+ or Iceberg v3 REST APIs, reader needs `EXTERNAL USE SCHEMA` + `SELECT`; add
+`delta.enableIcebergCompatV3 = true` for Iceberg readers. Compatibility mode (Public Preview) makes
+a read-only copy for older clients.
+
+## 9. Limitations
+
+- JARs not supported; Python libraries only. Global init scripts not supported.
+- `LOCATION` not supported; data lives in the schema/catalog/metastore managed storage.
+- UC UDFs cannot be created inside a pipeline (existing ones can be called).
+- MV cannot be a streaming source outside its pipeline; no time travel on MVs; no `CLONE`.
+- `ALTER TABLE` is disallowed on streaming tables (use `ALTER STREAMING TABLE` or `CREATE OR REFRESH`).
+- Hive metastore pipelines cannot be upgraded in place; a UC pipeline cannot publish to HMS.
+- Driver logs of UC pipelines are visible only to the owner and admins by default.
+- Backing data for MVs/STs lives in the reserved `__databricks_internal` catalog.
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/unity-catalog
+- https://docs.databricks.com/aws/en/ldp/target-schema
+- https://docs.databricks.com/aws/en/ldp/configure-pipeline
+- https://docs.databricks.com/aws/en/ldp/move-table
+- https://docs.databricks.com/aws/en/ldp/external-access
+- https://docs.databricks.com/aws/en/external-access/external-for-pipelines
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-create-materialized-view
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-python-ref-materialized-view
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-create-streaming-table
+- https://docs.databricks.com/aws/en/ldp/load
+- https://docs.databricks.com/aws/en/dev-tools/bundles/resources
+- https://docs.databricks.com/aws/en/release-notes/dlt/2026
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/29/
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/04/

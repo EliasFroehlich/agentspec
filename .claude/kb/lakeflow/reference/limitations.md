@@ -1,441 +1,147 @@
 # Lakeflow Pipelines Limitations
 
-> Source: https://docs.databricks.com/aws/en/dlt/limitations
+> **Purpose**: Current limits and restrictions of Lakeflow pipelines (workspace, datasets, flows, Unity Catalog, serverless, sinks, external access) with workarounds
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Workspace Constraints
+---
 
-### Concurrent Pipeline Updates
+## 1. Quotas
 
-**Limit:** 200 concurrent pipeline updates per workspace
+| Limit | Value |
+|-------|-------|
+| Concurrent pipeline updates per workspace | 1,000 |
+| Datasets per pipeline | 1,000 (an update may run out of memory earlier) |
+| Source files when the configuration lists individual files/notebooks | 100 |
+| Source entries when the configuration includes folders | 50 entries; 1,000 files referenced in total |
+| Updates per pipeline at a time | 1 (jobs cap concurrency to 1 for pipeline tasks) |
+| Update history kept in UI/API | 60 days (event log keeps older events) |
 
-**Impact:**
-- Shared resource across all pipelines
-- Large workspaces may hit limit
-- Queued pipelines wait for slot availability
+Workaround for many sources: organize files into folders (`glob` with `/**`).
 
-**Mitigation:**
-- Schedule pipelines to avoid overlap
-- Use triggered mode instead of continuous
-- Consider workspace organization
+## 2. Dataset and flow rules
 
-### Dataset Count
-
-**Limit:** Depends on pipeline configuration and workload complexity
-
-**Factors affecting limit:**
-- Available compute resources
-- Pipeline complexity
-- Memory requirements
-- Transformation logic
-
-**Mitigation:**
-- Break large pipelines into smaller ones
-- Optimize transformations
-- Increase cluster size
-- Use appropriate autoscaling
-
-## Dataset Definition Restrictions
-
-### Single Definition Rule
-
-**Limitation:** Datasets can be defined only once
+| Rule | Detail |
+|------|--------|
+| Define once | A dataset is the target of a single operation across all pipelines |
+| Exception: append flows | Any number of append flows can write to one streaming table |
+| Multiple AUTO CDC flows | Allowed into one streaming table when each flow has a unique `name` (2025.30+); an AUTO CDC target can only be targeted by other AUTO CDC flows |
+| Identity columns | Not supported on AUTO CDC targets; may be recomputed in materialized views, so use them only in streaming tables |
+| `pivot()` | Not supported (needs eager schema computation); use conditional aggregation |
+| Time travel | Streaming tables only, not materialized views |
+| `CLONE` | Materialized views cannot be the source or target of deep/shallow clone |
+| Partitioning + clustering | Setting both on one table errors |
+| Writes to other tables inside dataset code | Never call `save()`, `saveAsTable()`, `toTable()`, `start()`, `collect()`, `count()`, `toPandas()` |
 
 ```python
-# ❌ INVALID: Same table defined twice
-@dlt.table()
-def orders():
-    return spark.read.table("raw_orders")
+from pyspark import pipelines as dp
 
-@dlt.table()  # Error: orders already defined
-def orders():
-    return spark.read.table("backup_orders")
+# Multiple append flows into one target are valid
+dp.create_streaming_table("events")
 
-# ✅ VALID: Use different names
-@dlt.table()
-def orders_primary():
-    return spark.read.table("raw_orders")
+@dp.append_flow(target="events", name="from_web")
+def from_web():
+    return spark.readStream.table("main.raw.web_events")
 
-@dlt.table()
-def orders_backup():
-    return spark.read.table("backup_orders")
+@dp.append_flow(target="events", name="from_app")
+def from_app():
+    return spark.readStream.table("main.raw.app_events")
 ```
-
-### Single Target Operation
-
-**Limitation:** Dataset can be target of only one operation
-
-**Exception:** Streaming tables with append flow processing
-
-```python
-# ❌ INVALID: Multiple operations writing to same target
-dlt.apply_changes(target="customers", ...)
-dlt.apply_changes(target="customers", ...)  # Error
-
-# ✅ VALID: Different targets
-dlt.apply_changes(target="customers_current", ...)
-dlt.apply_changes(target="customers_history", ...)
-
-# ✅ VALID EXCEPTION: Append flows
-dlt.append_flow(
-    target="events",
-    source="source1",
-    name="flow1"
-)
-dlt.append_flow(
-    target="events",  # OK for append flows
-    source="source2",
-    name="flow2"
-)
-```
-
-## Identity Column Limitations
-
-### Not Supported with AUTO CDC
-
-**Limitation:** Identity columns not compatible with AUTO CDC processing
-
-```python
-# ❌ INVALID: Identity column with AUTO CDC
-dlt.create_streaming_table(
-    "customers",
-    schema="id BIGINT GENERATED ALWAYS AS IDENTITY, ..."
-)
-
-dlt.apply_changes(
-    target="customers",  # Error: has identity column
-    source="cdc_source",
-    keys=["customer_id"]
-)
-
-# ✅ VALID: No identity column
-dlt.create_streaming_table(
-    "customers",
-    schema="id BIGINT, ..."
-)
-```
-
-### Recomputation in Materialized Views
-
-**Limitation:** Identity values might be recomputed during materialized view updates
 
 ```sql
--- ⚠️ WARNING: Identity values may change on refresh
-CREATE OR REFRESH MATERIALIZED VIEW customers
-AS SELECT
-    row_number() OVER (ORDER BY created_at) as id,  -- May change
-    name,
-    email
-FROM raw_customers
+-- PIVOT replacement
+CREATE OR REFRESH MATERIALIZED VIEW sales_by_month AS
+SELECT product_id,
+       SUM(CASE WHEN month = 1 THEN amount END) AS jan,
+       SUM(CASE WHEN month = 2 THEN amount END) AS feb
+FROM sales GROUP BY product_id;
 ```
 
-**Recommendation:** Only use identity columns for streaming tables
-
-```python
-# ✅ RECOMMENDED: Identity column in streaming table
-@dlt.table(
-    schema="id BIGINT GENERATED ALWAYS AS IDENTITY, name STRING, email STRING"
-)
-def customers_streaming():
-    return spark.readStream.table("raw_customers")
-```
-
-## Access and Compatibility Constraints
-
-### Materialized Views and Streaming Tables Access
-
-**Limitation:** Only accessible by Databricks clients
-
-**Accessible from:**
-- ✅ Databricks SQL
-- ✅ Databricks notebooks
-- ✅ Databricks jobs
-- ✅ Other Lakeflow pipelines (same workspace)
-
-**Not accessible from:**
-- ❌ External BI tools (directly)
-- ❌ Third-party query engines
-- ❌ Non-Databricks clients
-
-**Workaround:** Use `sink` API for external access
-
-```python
-# Export to external system
-dlt.create_sink(
-    target="kafka_sink",
-    source="my_table",
-    kafka_bootstrap_servers="broker:9092",
-    kafka_topic="output_topic"
-)
-```
-
-### Unity Catalog Compatibility
-
-**Requirements:**
-- Must use Unity Catalog-enabled workspace
-- Specific compute access modes
-- Cannot use JAR libraries
-
-**Cannot upgrade:** Hive metastore pipelines to Unity Catalog
-
-## Query and Functionality Restrictions
-
-### Delta Lake Time Travel
-
-**Limitation:** Only supported for streaming tables
-
-```sql
--- ✅ VALID: Time travel on streaming table
-SELECT * FROM streaming_table
-VERSION AS OF 10
-
-SELECT * FROM streaming_table
-TIMESTAMP AS OF '2024-01-01'
-
--- ❌ INVALID: Time travel on materialized view
-SELECT * FROM materialized_view
-VERSION AS OF 10  -- Error
-```
-
-### Iceberg Read Support
-
-**Limitation:** Cannot enable Iceberg reads on materialized views and streaming tables
-
-```python
-# ❌ INVALID: Iceberg reads not supported
-@dlt.table()
-def iceberg_view():
-    return (
-        spark.read
-        .format("iceberg")
-        .load("catalog.schema.table")
-    )
-```
-
-### PIVOT Function
-
-**Limitation:** `pivot()` function is not supported
-
-```sql
--- ❌ INVALID: PIVOT not supported
-CREATE OR REFRESH MATERIALIZED VIEW pivoted_sales AS
-SELECT *
-FROM sales
-PIVOT (
-    SUM(amount) FOR month IN ('Jan', 'Feb', 'Mar')
-)
-
--- ✅ WORKAROUND: Use CASE statements
-CREATE OR REFRESH MATERIALIZED VIEW pivoted_sales AS
-SELECT
-    product_id,
-    SUM(CASE WHEN month = 'Jan' THEN amount ELSE 0 END) as Jan,
-    SUM(CASE WHEN month = 'Feb' THEN amount ELSE 0 END) as Feb,
-    SUM(CASE WHEN month = 'Mar' THEN amount ELSE 0 END) as Mar
-FROM sales
-GROUP BY product_id
-```
-
-## Compute and Catalog Limitations
-
-### Unity Catalog Pipelines
-
-**Cannot use:**
-- Custom JAR libraries
-- Schema modifications on streaming tables
-- Materialized views outside original pipeline
-
-**Requires:**
-- Standard access mode compute
-- Specific permission grants
-- Unity Catalog-enabled workspace
-
-### Serverless Limitations
-
-**Cannot configure:**
-- Worker count
-- Instance types
-- Cluster size
-- Custom Spark configurations
-
-**Requires:**
-- Unity Catalog
-- Serverless-enabled region
-- Accepted terms of use
-
-## Additional Constraints
-
-### Schema Evolution
-
-**Streaming Tables:**
-- ✅ Supports schema evolution
-- ✅ Can add columns
-- ❌ Cannot modify existing columns
-- ❌ Cannot drop columns
-
-**Materialized Views:**
-- ✅ Full schema flexibility
-- ✅ Schema recomputed on refresh
-
-### Cross-Pipeline Dependencies
-
-**Limitation:** Cannot reference tables from other pipelines
-
-```python
-# ❌ INVALID: Reference table from other pipeline
-@dlt.table()
-def combined_data():
-    return spark.read.table("other_pipeline.my_table")
-
-# ✅ VALID: Read from Unity Catalog
-@dlt.table()
-def combined_data():
-    return spark.read.table("catalog.schema.table")
-```
-
-### Nested Transactions
-
-**Limitation:** DML operations within pipeline code may have restrictions
-
-```python
-# ⚠️ CAUTION: Avoid complex DML in transformations
-@dlt.table()
-def problematic_pattern():
-    df = spark.read.table("source")
-
-    # Avoid this pattern
-    df.write.mode("overwrite").saveAsTable("temp_table")
-
-    return spark.read.table("temp_table")
-```
-
-## Workarounds and Best Practices
-
-### For External Access
-
-```python
-# Use sink API
-dlt.create_sink(
-    target="external_kafka",
-    source="my_materialized_view",
-    kafka_bootstrap_servers="broker:9092",
-    kafka_topic="output"
-)
-
-# Or write to regular Delta table
-@dlt.table()
-def exportable_table():
-    return spark.read.table("my_materialized_view")
-```
-
-### For PIVOT Operations
-
-```sql
--- Use CASE statements
-CREATE OR REFRESH MATERIALIZED VIEW monthly_sales AS
-SELECT
-    product_id,
-    SUM(CASE WHEN month = 1 THEN amount END) as jan_sales,
-    SUM(CASE WHEN month = 2 THEN amount END) as feb_sales,
-    SUM(CASE WHEN month = 3 THEN amount END) as mar_sales
-FROM sales
-GROUP BY product_id
-```
-
-### For Dataset Reuse
-
-```python
-# Create view for reuse
-@dlt.view()
-def common_transformation():
-    return spark.read.table("source").filter("status = 'ACTIVE'")
-
-# Use view in multiple tables
-@dlt.table()
-def table1():
-    return dlt.read("common_transformation").select("col1", "col2")
-
-@dlt.table()
-def table2():
-    return dlt.read("common_transformation").select("col3", "col4")
-```
-
-### For Identity Columns
-
-```python
-# Use sequence number instead
-from pyspark.sql import functions as F
-
-@dlt.table()
-def with_sequence():
-    return (
-        dlt.read("source")
-        .withColumn("seq_id", F.monotonically_increasing_id())
-    )
-```
-
-## Performance Considerations
-
-### Large Number of Datasets
-
-**Impact on:**
-- Pipeline startup time
-- Optimization time
-- Resource requirements
-
-**Optimization:**
-- Combine related transformations
-- Use views for intermediate steps
-- Split into multiple pipelines
-
-### Complex Transformations
-
-**May hit limits with:**
-- Deep nested queries
-- Wide dependencies
-- Heavy aggregations
-
-**Optimization:**
-- Break into stages
-- Materialize intermediate results
-- Use appropriate caching
-
-## Summary Table
-
-| Feature | Limitation | Workaround |
-|---------|-----------|------------|
-| **Concurrent updates** | 200 per workspace | Schedule appropriately |
-| **Dataset definition** | Once per pipeline | Use different names |
-| **Target operations** | One per dataset | Use different targets |
-| **Identity columns** | Not with AUTO CDC | Use regular columns |
-| **External access** | Databricks only | Use sink API |
-| **Time travel** | Streaming tables only | Use streaming tables |
-| **PIVOT** | Not supported | Use CASE statements |
-| **JAR libraries** | Not in Unity Catalog | Use Python libraries |
-| **Schema changes** | Limited on streaming tables | Use materialized views |
-| **Cross-pipeline refs** | Not supported | Use Unity Catalog tables |
-
-## Best Practices
-
-### ✅ DO
-
-1. **Plan for limitations** early in design
-2. **Use views** for reusable logic
-3. **Test limits** in development
-4. **Monitor resource usage**
-5. **Follow recommended patterns**
-
-### ❌ DON'T
-
-1. **Don't assume** all SQL features work
-2. **Don't ignore** concurrent update limits
-3. **Don't define** datasets multiple times
-4. **Don't use** identity columns with CDC
-5. **Don't expect** external tool access
-
-## Getting Help
-
-If you encounter limitations:
-1. Review documentation for workarounds
-2. Check community forums
-3. Contact Databricks support
-4. Consider feature requests
+## 3. Cross-pipeline and outside access
+
+| Statement | Correct reading |
+|-----------|-----------------|
+| Reading another pipeline's tables | Allowed: they are Unity Catalog tables |
+| Writing another pipeline's tables | Not allowed: only the owning pipeline updates them (use move tables to change ownership) |
+| Materialized view as a streaming source outside its pipeline | Not allowed (another pipeline or notebook cannot stream from it) |
+| Querying MVs/STs from Databricks SQL, notebooks, jobs, other pipelines | Allowed with `SELECT` grants |
+| Access from non-Databricks clients | Not by default. Options: external data access (no copy; clients on Delta 4.0+ or Iceberg v3 via UC / Iceberg REST APIs) or compatibility mode (Public Preview; read-only copy, scheduled refresh, any Delta/Iceberg client) |
+| Iceberg | MV/ST exposure uses IcebergCompatV3 through external data access; IcebergCompatV2 is not supported for MV/ST |
+
+## 4. Unity Catalog pipelines
+
+- Compute must use standard access mode (dedicated is not supported for running UC pipelines).
+- JARs are not supported; only third-party Python libraries (use the pipeline `environment`).
+- DML that modifies the schema of a streaming table is not supported. `ALTER TABLE` is disallowed
+  on streaming tables; use `CREATE OR REFRESH` or `ALTER STREAMING TABLE`. Column-level ALTER on
+  streaming tables became metadata-only in Aug 2026 (Beta, needs external metadata enabled).
+- `LOCATION` is not supported; tables use the schema/catalog managed storage.
+- Unity Catalog UDFs cannot be created inside a pipeline (existing UC UDFs can be called; Python UDF
+  support is Public Preview).
+- Hive metastore pipelines cannot be upgraded in place; clone into a new UC pipeline and re-ingest.
+- A UC pipeline cannot publish to the Hive metastore; global init scripts are not supported.
+- Run-as identity: user, service principal, or an account group assigned to the workspace
+  (not workspace-local groups, `admins`, `users`, or `account users`).
+- The Catalog Explorer History tab does not show history for materialized views.
+- Backing files of an MV can contain upstream values not visible in its schema; do not share the
+  underlying storage with untrusted consumers.
+
+## 5. Serverless pipelines
+
+- Require Unity Catalog, the `ADVANCED` edition, accepted serverless terms and a supported region.
+- No `clusters` block (error if present); the `configuration` map (Spark conf and parameters)
+  still works.
+- `dbutils.library.restartPython()` is not supported; declare dependencies in `environment`.
+- AWS PrivateLink needs your Databricks account team.
+- Structured Streaming trigger limitations of serverless compute do not apply to pipeline modes;
+  serverless pipelines support triggered, continuous and real-time modes.
+
+## 6. Sinks and ForEachBatch
+
+- Python only; streaming queries only; written by `append_flow` or `update_flow` only.
+- No expectations; a full refresh does not clean the sink (reprocessed data is appended).
+- Delta sinks need fully qualified names (`<catalog>.<schema>.<table>`).
+- A sink cannot be read back as a pipeline dataset.
+- ForEachBatch: you own downstream cleanup on full refresh; functions must be serializable for
+  Databricks Connect (no `dbutils` inside).
+
+## 7. Expectations
+
+- Supported on streaming tables, materialized views and temporary views only.
+- Not supported on sinks or `AUTO CDC FROM SNAPSHOT` flows.
+- No subqueries on other tables, Python UDFs or external calls in constraints.
+- `fail` records no metrics.
+
+## Summary
+
+| Area | Limitation | Workaround |
+|------|-----------|------------|
+| Concurrent updates | 1,000 per workspace | Spread schedules; use triggered mode |
+| Datasets | 1,000 per pipeline | Split pipelines; move tables between them |
+| Source files | 100 files or 50 folder entries | Use folders and `glob` |
+| Same target | One defining operation | Append flows / named AUTO CDC flows |
+| Identity columns | Not with AUTO CDC | Surrogate keys in a downstream MV or `xxhash64` of business keys |
+| External engines | Not by default | External data access or compatibility mode |
+| Time travel | STs only | Snapshot an MV into a regular Delta table if history is needed |
+| PIVOT | Not supported | Conditional aggregation |
+| JAR | Not in UC | Python libraries |
+
+## Sources
+
+- https://docs.databricks.com/aws/en/ldp/limitations
+- https://docs.databricks.com/aws/en/ldp/unity-catalog
+- https://docs.databricks.com/aws/en/ldp/concepts/flows
+- https://docs.databricks.com/aws/en/ldp/concepts/materialized-views
+- https://docs.databricks.com/aws/en/ldp/external-access
+- https://docs.databricks.com/aws/en/external-access/external-for-pipelines
+- https://docs.databricks.com/aws/en/delta/iceberg-reads
+- https://docs.databricks.com/aws/en/ldp/serverless
+- https://docs.databricks.com/aws/en/ldp/ldp-sinks
+- https://docs.databricks.com/aws/en/ldp/for-each-batch
+- https://docs.databricks.com/aws/en/ldp/expectations
+- https://docs.databricks.com/aws/en/ldp/configure-pipeline
+- https://docs.databricks.com/aws/en/ldp/parameters
+- https://docs.databricks.com/aws/en/ldp/developer/python-ref
+- https://docs.databricks.com/aws/en/ldp/developer/ldp-sql-ref-create-streaming-table
+- https://docs.databricks.com/aws/en/release-notes/dlt/2026
+- https://docs.databricks.com/aws/en/release-notes/dlt/2025/30/

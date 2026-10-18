@@ -1,16 +1,27 @@
 schema_version: "1.0"
 domain: python-clean-code
 file_type: code-standards
-last_validated: "2026-02-17"
-source: "PEP 8, PEP 484, PEP 585, PEP 604, PEP 673, PEP 695, mypy, ruff"
+last_validated: "2026-10-17"
+source: "PEP 8, PEP 484, PEP 585, PEP 604, PEP 673, PEP 695, PEP 735, devguide.python.org/versions, mypy, ruff, Databricks Runtime 17.3 LTS release notes"
 
 python:
-  minimum_version: "3.11"
-  preferred_version: "3.12"
+  # 3.10 reached end-of-life on 2026-10-01; 3.11-3.13 receive security fixes only;
+  # 3.14 and 3.15 (released 2026-10-09) are the bugfix branches.
+  minimum_version: "3.12"
+  preferred_version: "3.12"   # = Databricks Runtime 17.3 LTS interpreter, not a general preference
   target_versions:
-    - "3.11"
     - "3.12"
     - "3.13"
+    - "3.14"
+    - "3.15"                  # new projects that do not run on a 3.12 runtime
+  runtime_targets:
+    - runtime: "Databricks Runtime 17.3 LTS"
+      python: "3.12.3"
+      preinstalled: {pydantic: "2.10.6", pytest: "8.3.5", typing_extensions: "4.12.2", pyright: "1.1.394"}
+      rule: "No 3.13+ syntax or stdlib names (TypeIs/ReadOnly/deprecated via typing_extensions; no t-strings, `except A, B:`, `lazy import`)"
+  rules:
+    - "Set requires-python and ruff target-version from the deployment interpreter"
+    - "Use datetime.now(UTC), never the deprecated (3.12) naive datetime.utcnow()"
 
 style:
   formatter: "ruff format"
@@ -23,8 +34,11 @@ style:
 
 type_hints:
   enforced: true
-  tool: "mypy"
+  tool: "mypy"                # 2.x (2.4.0 on 2026-10-01)
   strict_mode: true
+  alternatives:
+    - "pyright (preinstalled on DBR 17.3 LTS)"
+    - "ty (Astral) -- beta, 0.0.x, no stable API yet; do not gate CI on it"
   rules:
     - "Use `X | Y` instead of `Union[X, Y]` (PEP 604, 3.10+)"
     - "Use `X | None` instead of `Optional[X]` (PEP 604, 3.10+)"
@@ -72,7 +86,7 @@ functions:
 
 error_handling:
   rules:
-    - "Never use bare `except:` or `except Exception:`"
+    - "Never use bare `except:`; `except Exception:` only at the outermost boundary, re-raised or chained"
     - "Always chain exceptions with `raise X from original`"
     - "Define custom exception hierarchy with base AppError"
     - "Log at error boundaries, not at raise sites"
@@ -88,7 +102,7 @@ imports:
     - "Never use `from x import *`"
     - "Group imports by category with blank line between groups"
     - "Use absolute imports for clarity"
-    - "Let ruff/isort handle import ordering"
+    - "Let ruff (`I` rules) handle import ordering"
 
 testing:
   framework: "pytest"
@@ -104,6 +118,7 @@ testing:
 project_structure:
   layout: "src-layout"
   config_file: "pyproject.toml"
+  package_manager: "uv"       # lockfile uv.lock; dev tools in [dependency-groups] (PEP 735)
   rules:
     - "Use src/ layout for packages"
     - "All config in pyproject.toml (no setup.py, setup.cfg)"
@@ -112,6 +127,8 @@ project_structure:
     - "No circular imports between modules"
 
 ruff:
+  min_version: "0.17"
+  target_version: "py312"     # match python.preferred_version
   config:
     select:
       - "E"    # pycodestyle errors
@@ -125,6 +142,4 @@ ruff:
       - "ANN"  # flake8-annotations
       - "C4"   # flake8-comprehensions
       - "PT"   # flake8-pytest-style
-    ignore:
-      - "ANN101"  # missing self annotation
-      - "ANN102"  # missing cls annotation
+    ignore: []    # ANN101/ANN102 were removed in ruff 0.8.0 -- do not list them

@@ -1,153 +1,132 @@
 # Performance Tuning
 
-> **Purpose**: Broadcast joins, skew handling, AQE settings, caching strategy, Spark UI diagnosis
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Diagnose and fix slow Spark jobs — AQE and auto-optimized shuffle, broadcast joins, skew (AQE first, salting when needed), caching rules, write sizing, Photon — for OSS Spark 4.x and Databricks
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Spark job is slow or failing with OOM errors
-- Shuffle stages dominate execution time
-- Data skew causes straggler tasks
-- Need to right-size cluster or partition count
+- A stage dominates runtime (shuffle, skewed tasks, spill) or the job fails with OOM
+- Many tiny tasks or tiny output files, or a few huge ones
+- Cost per run is too high on Databricks (check Photon, cluster sizing, layout)
+
+Measure first: Spark UI (classic compute) or the query profile (serverless / SQL warehouses).
 
 ## Implementation
 
 ```python
 from pyspark.sql import functions as F
-from pyspark.sql import SparkSession
 
-spark = SparkSession.builder.getOrCreate()
+# --- 1. AQE + SHUFFLE SIZING ---------------------------------------------------
+# AQE is on by default (OSS since 3.2; Databricks too). Don't re-set defaults.
+# Databricks: let auto-optimized shuffle choose the initial partition count (serverless default).
+spark.conf.set("spark.sql.shuffle.partitions", "auto")      # Databricks only
+# OSS Spark: keep an integer and let AQE coalesce:
+# spark.conf.set("spark.sql.shuffle.partitions", "400")
 
+# --- 2. BROADCAST JOINS -----------------------------------------------------------
+# Static planning uses spark.sql.autoBroadcastJoinThreshold (OSS default 10 MB).
+# Databricks AQE also converts sort-merge -> broadcast at runtime below
+# spark.databricks.adaptive.autoBroadcastJoinThreshold (default 30 MB).
+# If you know a dimension is small, hint it: a planned broadcast beats a runtime switch,
+# because AQE may only switch after both sides were already shuffled.
+result = orders_df.join(F.broadcast(dim_country), "country_code", "left")
+# Note: the left side of a LEFT OUTER JOIN cannot be broadcast.
 
-# --- AQE (Adaptive Query Execution) — enable everything ---
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
-spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
-spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
-spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256m")
+# --- 3. SKEW -------------------------------------------------------------------------
+# AQE splits skewed partitions of sort-merge / shuffle-hash joins automatically when a partition
+# is > skewedPartitionFactor (5) x median AND > skewedPartitionThresholdInBytes (256 MB).
+# Databricks: prefer AQE over skew hints (skew-hint docs are retired).
+# Salting is still needed where AQE does not help: skewed groupBy/aggregations, FULL OUTER joins,
+# the non-optimizable side of LEFT/RIGHT joins.
+SALT = 16
+hot = (orders_df
+    .withColumn("salt", (F.rand(seed=7) * SALT).cast("int"))
+    .groupBy("customer_id", "salt").agg(F.sum("amount").alias("partial"))   # spread the hot key
+    .groupBy("customer_id").agg(F.sum("partial").alias("amount")))          # merge partials
 
-
-# --- BROADCAST JOIN (small table < 10MB) ---
-# Explicit hint — sends dim table to all executors, avoids shuffle
-from pyspark.sql.functions import broadcast
-
-result = orders_df.join(broadcast(dim_country), "country_code", "left")
-
-# Auto-broadcast threshold (default 10MB)
-spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "50m")  # raise for medium dims
-
-
-# --- SALTING SKEWED KEYS ---
-# Problem: 80% of orders belong to customer_id = "GUEST"
-salt_buckets = 10
-
-# Salt the skewed side
-orders_salted = (orders_df
-    .withColumn("salt", (F.rand() * salt_buckets).cast("int"))
-    .withColumn("join_key", F.concat("customer_id", F.lit("_"), "salt")))
-
-# Explode the dimension side to match all salts
-customers_exploded = (customers_df
-    .crossJoin(spark.range(salt_buckets).withColumnRenamed("id", "salt"))
-    .withColumn("join_key", F.concat("customer_id", F.lit("_"), "salt")))
-
-# Join on salted key — distributes "GUEST" across 10 partitions
-result = orders_salted.join(customers_exploded, "join_key", "inner")
-
-
-# --- CACHING (with cleanup) ---
+# --- 4. CACHING ----------------------------------------------------------------------
+# Only when a DataFrame is reused AND recomputing it is expensive. Always release it.
+# NOT supported on Databricks serverless: df.cache()/persist()/unpersist(), CACHE TABLE raise errors.
 filtered = orders_df.filter(F.col("status") == "active").cache()
-filtered.count()  # materialize the cache
+try:
+    summary = filtered.groupBy("region").agg(F.sum("amount"))
+    detail = filtered.filter(F.col("amount") > 1000)
+    summary.write.mode("overwrite").saveAsTable("main.sales.region_summary")
+    detail.write.mode("overwrite").saveAsTable("main.sales.big_orders")
+finally:
+    filtered.unpersist()
+# Portable alternative (serverless, Spark Connect): materialize the intermediate as a table,
+# or restructure into a single pass.
 
-# Use cached DataFrame multiple times
-summary = filtered.groupBy("region").agg(F.sum("amount"))
-detail = filtered.filter(F.col("amount") > 1000)
-
-filtered.unpersist()  # always clean up
-
-
-# --- REPARTITION FOR WRITE ---
-# Target: ~128MB per file, ~128MB per partition
-target_size_bytes = 128 * 1024 * 1024
-data_size = spark.sparkContext._jsc.sc().getExecutorMemoryStatus().size()
+# --- 5. WRITE SIZING -------------------------------------------------------------------
+# Delta on Databricks (UC managed): file size is auto-tuned; use liquid clustering +
+# predictive optimization instead of manual repartition/OPTIMIZE schedules.
+# Elsewhere: REBALANCE asks AQE for evenly sized output partitions (ignored if AQE is off).
+spark.sql("""
+    INSERT OVERWRITE TABLE main.sales.orders_curated
+    SELECT /*+ REBALANCE(order_date) */ * FROM main.sales.orders_stage
+""")
+# Table size without JVM internals (works on Spark Connect):
+size_bytes = spark.sql("DESCRIBE DETAIL main.sales.orders").first()["sizeInBytes"]
 ```
 
 ## Configuration
 
-| Setting | Default | Recommendation |
-|---------|---------|---------------|
-| `spark.sql.adaptive.enabled` | `true` (3.2+) | Always on |
-| `spark.sql.shuffle.partitions` | `200` | Let AQE auto-coalesce |
-| `spark.sql.autoBroadcastJoinThreshold` | `10m` | Raise to 50-100m if memory allows |
-| `spark.sql.adaptive.skewJoin.enabled` | `true` | Always on |
-| `spark.sql.files.maxPartitionBytes` | `128m` | Match target file size |
-| `spark.locality.wait` | `3s` | Lower to `0s` on cloud (no data locality) |
+| Setting | OSS Spark default | Databricks | Recommendation |
+|---------|-------------------|------------|----------------|
+| `spark.sql.adaptive.enabled` / `spark.databricks.optimizer.adaptive.enabled` | `true` (3.2+) | `true` | Leave on |
+| `spark.sql.shuffle.partitions` | `200` | `200` classic, `auto` serverless | Databricks: `auto`; OSS: size to data, AQE coalesces |
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | follows `targetPostShuffleInputSize` | `64MB` | Leave unless tasks are clearly too big/small |
+| `spark.sql.autoBroadcastJoinThreshold` | `10MB` | static planning | Raise cautiously — broadcast tables are collected through the driver |
+| `spark.databricks.adaptive.autoBroadcastJoinThreshold` | — | `30MB` | Runtime SMJ→BHJ switch |
+| `spark.sql.adaptive.skewJoin.enabled` | `true` | `true` | Leave on |
+| `spark.sql.files.maxPartitionBytes` | `128MB` | `128MB` | Input split size, not output file size |
+| `spark.sql.optimizer.dynamicPartitionPruning.enabled` | `true` | `true` | Leave on |
+
+On Databricks, executor memory/cores come from the node type and cluster policy; tune by choosing
+the instance type and worker count, not `spark.executor.memory`. On standard access mode some Spark
+properties cannot be set at all.
+
+## Photon (Databricks)
+
+On by default for classic jobs/all-purpose compute created in the UI (API: `runtime_engine:
+PHOTON`), always on for serverless and SQL warehouses. UDFs, RDD/Dataset APIs and stateful
+streaming fall back to the JVM engine. See [photon](../concepts/photon.md).
 
 ## Example Usage
 
 ```python
-# Diagnose: check partition sizes after a shuffle
-df.groupBy(F.spark_partition_id()).count().orderBy("count", ascending=False).show(10)
+# Diagnose: rows per partition after a shuffle
+df.groupBy(F.spark_partition_id().alias("pid")).count().orderBy(F.desc("count")).show(10)
 
-# Diagnose: check for skew in join keys
-df.groupBy("join_key").count().orderBy("count", ascending=False).show(10)
-```
+# Diagnose: hot join keys
+df.groupBy("join_key").count().orderBy(F.desc("count")).show(10)
 
-## Spark 4.0 Performance Additions
-
-### TransformWithState (Replaces mapGroupsWithState)
-
-```python
-# Spark 4.0: new stateful streaming operator
-# Supports object-oriented state, composite types, auto TTL, timers
-from pyspark.sql.streaming import TransformWithState
-
-class SessionTracker(TransformWithState):
-    """Track user sessions with automatic TTL-based expiry."""
-
-    def init(self, handle):
-        self.session = handle.getValueState("session", schema)
-
-    def handleInputRows(self, key, rows, timer_values):
-        # Process rows, update state with TTL
-        for row in rows:
-            self.session.update(new_state)
-        # Set timer for session timeout
-        timer_values.register_event_time_timer(expiry_ms)
-
-    def handleExpiredTimer(self, key, timer_values):
-        # Emit session summary when timer fires
-        yield self.session.get()
-        self.session.clear()
-```
-
-### Arrow UDFs (Replacing Pandas UDFs)
-
-```python
-# Spark 4.0: Arrow-optimized UDFs — faster than Pandas UDFs
-# Operates on Arrow data directly, no serialization overhead
-import pyarrow.compute as pc
-
-@F.udf(returnType=StringType(), useArrow=True)
-def normalize_email(email):
-    return pc.utf8_lower(email)
-
-df = df.withColumn("email_clean", normalize_email("email"))
-```
-
-### Spark Connect Mode Toggle
-
-```python
-# Switch between classic and Connect mode
-spark.conf.set("spark.api.mode", "connect")  # thin client mode
-spark.conf.set("spark.api.mode", "classic")   # traditional mode
-
-# Or use the lightweight client package
-# pip install pyspark-client  (1.5 MB vs ~300 MB full pyspark)
+# Did AQE change the plan? Run the action, then inspect the final plan
+df.explain(mode="formatted")   # look for AdaptiveSparkPlan isFinalPlan=true, Coalesced, isSkew=true
 ```
 
 ## See Also
 
 - [partitioning](../concepts/partitioning.md)
 - [catalyst-optimizer](../concepts/catalyst-optimizer.md)
+- [photon](../concepts/photon.md)
+- [python-udfs](../patterns/python-udfs.md)
+- [delta-integration](../patterns/delta-integration.md)
 - [spark-connect](../concepts/spark-connect.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/optimizations/aqe
+- https://docs.databricks.com/aws/en/optimizations/skew-join
+- https://docs.databricks.com/aws/en/spark/conf
+- https://docs.databricks.com/aws/en/compute/photon
+- https://docs.databricks.com/aws/en/compute/serverless/limitations
+- https://docs.databricks.com/aws/en/compute/standard-limitations
+- https://docs.databricks.com/aws/en/delta/tune-file-size
+- https://docs.databricks.com/aws/en/optimizations/predictive-optimization
+- https://spark.apache.org/docs/latest/sql-performance-tuning.html
+- https://spark.apache.org/docs/latest/configuration.html
+- https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-hints.html
+- https://docs.databricks.com/aws/en/delta/table-details

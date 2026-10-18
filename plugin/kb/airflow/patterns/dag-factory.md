@@ -1,95 +1,86 @@
 # DAG Factory
 
-> **Purpose**: Parameterized DAG generation from YAML config; dynamic mapping with TaskGroups; factory pattern for standardized pipelines
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Parameterized Dag generation from YAML config with TaskGroups; Airflow 3.x imports, auto-registration and parse-time optimization
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Multiple similar pipelines with different sources/targets
-- Standardizing DAG structure across teams
-- Reducing boilerplate in Airflow projects with 50+ DAGs
-- Need consistent retry, alerting, and SLA config across DAGs
+- Many similar pipelines that differ only by source, target or schedule
+- Standardizing Dag structure, retries and alerting across teams
+- Reducing boilerplate in projects with dozens of Dags
 
 ## Implementation
 
 ```python
 from __future__ import annotations
 
-import yaml
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from airflow.decorators import dag, task
-from airflow.utils.task_group import TaskGroup
+import yaml
 
+from airflow.providers.slack.notifications.slack_webhook import SlackWebhookNotifier
+from airflow.sdk import BaseHook, TaskGroup, dag, get_parsing_context, task
 
-# --- YAML CONFIG (dags/configs/pipeline_orders.yaml) ---
+# --- YAML CONFIG (configs/pipeline_orders.yaml, next to this file) ---
 # pipeline_name: orders
 # schedule: "0 6 * * *"
 # owner: data-team
 # retries: 3
-# source:
-#   type: postgres
-#   conn_id: source_postgres
-#   tables: [raw_orders, raw_order_items, raw_payments]
-# target:
-#   type: snowflake
-#   conn_id: target_snowflake
-#   schema: staging
+# source: {type: postgres, conn_id: source_postgres, tables: [raw_orders, raw_order_items]}
+# target: {type: snowflake, conn_id: target_snowflake, schema: staging}
+
+CONFIG_DIR = Path(__file__).parent / "configs"   # relative to the Dag file, not the CWD
 
 
-def load_pipeline_configs(config_dir: str = "dags/configs") -> list[dict]:
-    """Load all YAML pipeline configs from directory."""
-    configs = []
-    for path in Path(config_dir).glob("pipeline_*.yaml"):
-        with open(path) as f:
-            configs.append(yaml.safe_load(f))
-    return configs
+def load_pipeline_configs(config_dir: Path = CONFIG_DIR) -> list[dict]:
+    """Load all YAML pipeline configs (cheap: runs on every parse)."""
+    return [yaml.safe_load(p.read_text()) for p in sorted(config_dir.glob("pipeline_*.yaml"))]
 
 
 def create_dag(config: dict):
-    """Factory: create a DAG from a pipeline config dict."""
-
+    """Factory: build one Dag from a config dict."""
     default_args = {
         "owner": config.get("owner", "data-team"),
         "retries": config.get("retries", 2),
         "retry_delay": timedelta(minutes=5),
         "execution_timeout": timedelta(hours=2),
+        "on_failure_callback": SlackWebhookNotifier(
+            slack_webhook_conn_id="slack_data_alerts",
+            text="{{ dag.dag_id }}.{{ ti.task_id }} failed (run {{ run_id }})",
+        ),
     }
 
     @dag(
         dag_id=f"pipeline_{config['pipeline_name']}",
         default_args=default_args,
-        schedule=config.get("schedule", None),
-        start_date=datetime(2024, 1, 1),
+        schedule=config.get("schedule"),
+        start_date=datetime(2026, 1, 1),
         catchup=False,
         tags=["factory", config["pipeline_name"]],
     )
     def pipeline():
         @task
         def extract(table: str, conn_id: str) -> dict:
-            """Extract table from source system."""
-            from airflow.hooks.base import BaseHook
-            hook = BaseHook.get_hook(conn_id)
-            return {"table": table, "row_count": hook.get_records(f"SELECT COUNT(*) FROM {table}")[0][0]}
+            hook = BaseHook.get_hook(conn_id)        # DbApiHook subclass for SQL sources
+            count = hook.get_records(f"SELECT COUNT(*) FROM {table}")[0][0]
+            return {"table": table, "row_count": count}
 
         @task
         def load(extract_result: dict, target_conn: str, target_schema: str) -> str:
-            """Load extracted data to target warehouse."""
             return f"Loaded {extract_result['table']} ({extract_result['row_count']} rows) to {target_schema}"
 
         @task
         def quality_check(load_result: str) -> None:
-            """Run post-load quality checks."""
-            assert "Loaded" in load_result, f"Load failed: {load_result}"
+            if "Loaded" not in load_result:
+                raise ValueError(f"Load failed: {load_result}")
 
-        # --- Dynamic TaskGroup per source table ---
-        with TaskGroup("ingest") as ingest_group:
+        with TaskGroup("ingest"):
             for table in config["source"]["tables"]:
                 with TaskGroup(f"process_{table}"):
-                    extracted = extract(table=table, conn_id=config["source"]["conn_id"])
                     loaded = load(
-                        extract_result=extracted,
+                        extract_result=extract(table=table, conn_id=config["source"]["conn_id"]),
                         target_conn=config["target"]["conn_id"],
                         target_schema=config["target"]["schema"],
                     )
@@ -98,25 +89,31 @@ def create_dag(config: dict):
     return pipeline()
 
 
-# --- Generate DAGs at module level (Airflow discovers these) ---
+# --- Generate Dags. @dag-created Dags auto-register (2.4+): no globals() needed. ---
+# When a worker runs one task, build only that Dag (get_parsing_context, 2.4+).
+_current = get_parsing_context().dag_id
 for cfg in load_pipeline_configs():
-    globals()[f"pipeline_{cfg['pipeline_name']}"] = create_dag(cfg)
+    if _current is not None and _current != f"pipeline_{cfg['pipeline_name']}":
+        continue
+    create_dag(cfg)
 ```
 
 ## Configuration
 
 | Parameter | Location | Purpose |
 |-----------|----------|---------|
-| `pipeline_name` | YAML | Unique DAG identifier |
-| `schedule` | YAML | Cron expression |
-| `source.tables` | YAML | List of tables to ingest |
-| `retries` | YAML / default_args | Override per-pipeline |
-| `config_dir` | `load_pipeline_configs()` | Path to YAML configs |
+| `pipeline_name` | YAML | Unique Dag identifier suffix |
+| `schedule` | YAML | Cron string (3.x default timetable: `CronTriggerTimetable`) or `null` |
+| `source.tables` | YAML | Tables to ingest (one TaskGroup each) |
+| `retries` | YAML / `default_args` | Per-pipeline override |
+| `auto_register` | `@dag(...)` | Default `True`; set `False` to stop automatic registration |
+| `[dag_processor] min_file_process_interval` | airflow.cfg | Default 30 s: how often each file (and its YAML loop) is re-parsed |
+| `[dag_processor] refresh_interval` | airflow.cfg | Default 300 s: how often new files in the bundle are discovered |
 
 ## Example Usage
 
 ```yaml
-# dags/configs/pipeline_payments.yaml
+# configs/pipeline_payments.yaml
 pipeline_name: payments
 schedule: "30 7 * * *"
 owner: finance-team
@@ -131,8 +128,20 @@ target:
   schema: staging_finance
 ```
 
+Keep the factory cheap at parse time: no network or database calls outside tasks, and keep the config
+in files that ship with the Dag bundle. When a table list must come from a database at runtime, map over it
+with `expand()` inside a single Dag instead (see [dynamic-task-mapping](dynamic-task-mapping.md)).
+
 ## See Also
 
 - [dag-design](../concepts/dag-design.md)
-- [dynamic-task-mapping](../patterns/dynamic-task-mapping.md)
-- [error-handling](../patterns/error-handling.md)
+- [dynamic-task-mapping](dynamic-task-mapping.md)
+- [error-handling](error-handling.md)
+
+## Sources
+
+- https://airflow.apache.org/docs/apache-airflow/stable/howto/dynamic-dag-generation.html
+- https://airflow.apache.org/docs/task-sdk/stable/api.html (`BaseHook.get_hook`, `TaskGroup`, `get_parsing_context`)
+- https://airflow.apache.org/docs/apache-airflow/stable/installation/upgrading_to_airflow3.html
+- https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html (`[dag_processor]`)
+- https://airflow.apache.org/docs/apache-airflow-providers-slack/stable/_api/airflow/providers/slack/notifications/slack_webhook/index.html

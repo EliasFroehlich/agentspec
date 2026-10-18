@@ -1,7 +1,7 @@
 # LLM Output Validation
 
 > **Purpose**: Validate and parse LLM JSON responses into typed Pydantic models
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -15,14 +15,13 @@
 ```python
 import json
 import logging
-from typing import Optional, TypeVar
-from pydantic import BaseModel, Field, ValidationError
+
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T", bound=BaseModel)
 
 
-def validate_llm_output(
+def validate_llm_output[T: BaseModel](   # PEP 695 (Python 3.12+)
     raw_response: str,
     model_class: type[T],
     strict: bool = False,
@@ -38,27 +37,23 @@ def validate_llm_output(
         Validated model instance.
 
     Raises:
-        ValidationError: If the output does not match the schema.
-        ValueError: If the output is not valid JSON.
+        ValidationError: If the output does not match the schema, including
+            malformed JSON (error type "json_invalid"; ValidationError subclasses ValueError).
     """
     cleaned = _extract_json(raw_response)
     return model_class.model_validate_json(cleaned, strict=strict)
 
 
-def validate_llm_output_safe(
+def validate_llm_output_safe[T: BaseModel](
     raw_response: str,
     model_class: type[T],
-) -> tuple[Optional[T], Optional[list[dict]]]:
+) -> tuple[T | None, list[dict] | None]:
     """Non-raising version that returns (result, errors)."""
     try:
-        result = validate_llm_output(raw_response, model_class)
-        return result, None
-    except ValidationError as e:
-        logger.warning("Validation failed: %s", e.error_count())
+        return validate_llm_output(raw_response, model_class), None
+    except ValidationError as e:   # covers schema errors and json_invalid
+        logger.warning("Validation failed: %s errors", e.error_count())
         return None, e.errors()
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.warning("JSON parse failed: %s", str(e))
-        return None, [{"type": "json_invalid", "msg": str(e)}]
 
 
 def _extract_json(text: str) -> str:
@@ -93,21 +88,22 @@ def build_format_instruction(model_class: type[BaseModel]) -> str:
 ## Example Usage
 
 ```python
+from typing import Literal
+
 from pydantic import BaseModel, Field
-from typing import Optional
 
 
 class ExtractedEntity(BaseModel):
-    name: str = Field(..., description="Entity name")
-    entity_type: str = Field(..., description="One of: person, org, location")
-    confidence: float = Field(..., ge=0, le=1, description="Extraction confidence")
-    context: Optional[str] = Field(None, description="Surrounding text snippet")
+    name: str = Field(description="Entity name")
+    entity_type: Literal["person", "org", "location"] = Field(description="Entity category")
+    confidence: float = Field(ge=0, le=1, description="Extraction confidence")
+    context: str | None = Field(default=None, description="Surrounding text snippet")
 
 
 # 1. Generate prompt instructions
 instructions = build_format_instruction(ExtractedEntity)
 
-# 2. Send to LLM (example with Gemini)
+# 2. Send to any LLM client
 prompt = f"Extract entities from: 'John works at Acme in NYC'\n\n{instructions}"
 llm_response = call_llm(prompt)  # returns JSON string
 
@@ -133,11 +129,9 @@ from pydantic_core import from_json
 
 # Useful for streaming LLM responses
 partial_json = '{"name": "John", "entity_type": "pers'
-try:
-    data = from_json(partial_json, allow_partial=True)
-    # data = {"name": "John", "entity_type": "pers"}
-except ValueError:
-    pass
+from_json(partial_json, allow_partial=True)                # {'name': 'John'} -- unfinished string dropped
+from_json(partial_json, allow_partial="trailing-strings")  # {'name': 'John', 'entity_type': 'pers'}
+# Validate with model_validate() only when the stream is complete, or give late-arriving fields defaults
 ```
 
 ## TypeAdapter for List Validation
@@ -158,26 +152,33 @@ schema = EntityListAdapter.json_schema()
 ## Discriminated Unions for Multi-Type LLM Output
 
 ```python
-from typing import Literal, Union
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, Field
+
 
 class PersonEntity(BaseModel):
     entity_type: Literal["person"]
     name: str
     role: str | None = None
 
+
 class OrgEntity(BaseModel):
     entity_type: Literal["org"]
     name: str
     industry: str | None = None
 
-class EntityResult(BaseModel):
-    entities: list[Union[PersonEntity, OrgEntity]] = Field(
-        discriminator="entity_type"
-    )
 
-# Pydantic picks the right model based on entity_type
-result = EntityResult.model_validate_json(llm_response)
+# The discriminator goes on the union *inside* the list. Putting Field(discriminator=...)
+# on the list field itself raises TypeError when the class is defined.
+Entity = Annotated[PersonEntity | OrgEntity, Field(discriminator="entity_type")]
+
+
+class EntityResult(BaseModel):
+    entities: list[Entity]
+
+
+result = EntityResult.model_validate_json(llm_response)   # unknown tag -> union_tag_invalid
 ```
 
 ## See Also
@@ -185,3 +186,11 @@ result = EntityResult.model_validate_json(llm_response)
 - [Error Handling](../patterns/error-handling.md)
 - [Extraction Schema](../patterns/extraction-schema.md)
 - [BaseModel](../concepts/base-model.md)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/concepts/json/
+- https://docs.pydantic.dev/latest/api/pydantic_core/
+- https://docs.pydantic.dev/latest/concepts/unions/
+- https://docs.pydantic.dev/latest/concepts/type_adapter/
+- https://docs.pydantic.dev/latest/errors/validation_errors/

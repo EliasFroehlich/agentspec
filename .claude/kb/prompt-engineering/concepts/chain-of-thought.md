@@ -1,140 +1,128 @@
-# Chain-of-Thought Prompting
+# Chain-of-Thought and Model Thinking
 
-> **Purpose**: Guide LLMs through explicit step-by-step reasoning to improve accuracy on complex tasks
-> **Confidence**: 0.95
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Get better reasoning from LLMs — built-in thinking controlled by effort on current models, manual chain-of-thought as a fallback, ReAct and self-consistency
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Chain-of-Thought (CoT) prompting instructs the model to reason step by step before producing a final answer. In 2026, CoT has evolved into several variants: zero-shot CoT ("think step by step"), few-shot CoT (worked examples), self-consistency (sample multiple paths), and ReAct (interleave reasoning with tool actions). Claude 4.x models support "extended thinking" -- a native CoT mode where the model reasons in a dedicated thinking block before responding.
+Chain-of-thought (CoT) means letting the model reason before it answers. Current frontier models do this natively:
+Claude uses **adaptive thinking**, controlled by `output_config.effort` (`low` … `max`), and OpenAI reasoning models take
+`reasoning={"effort": ...}` in the Responses API. With these, prefer general instructions ("think thoroughly about edge
+cases") over hand-written step lists, and do not ask the model to write its reasoning into the answer — on Claude Fable 5.1,
+Fable 5, Opus 5.5, Opus 5 and Sonnet 5.5 such prompts (for example "reason inside `<thinking>` tags") may be declined.
+Manual CoT remains useful when thinking is off or the model has no reasoning mode.
 
-## The Pattern
+## The Pattern: Claude adaptive thinking
 
 ```python
-from anthropic import Anthropic
+import anthropic
 
-client = Anthropic()
-
-# Claude extended thinking -- native CoT
-response = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=8000,
-    thinking={
-        "type": "enabled",
-        "budget_tokens": 4000  # tokens allocated for reasoning
-    },
-    messages=[{
-        "role": "user",
-        "content": "Analyze this financial data and determine quarterly growth rate.\n\n{data}"
-    }]
+client = anthropic.Anthropic()
+resp = client.messages.create(
+    model="claude-opus-5-5",                 # thinking is always on for Opus 5.5 and Fable 5.1
+    max_tokens=16000,                        # thinking tokens count toward max_tokens
+    thinking={"type": "adaptive", "display": "summarized"},   # default display is "omitted" (empty text)
+    output_config={"effort": "high"},        # effort is the depth/cost lever
+    messages=[{"role": "user", "content": f"Determine the quarterly growth rate and flag anomalies.\n\n{data}"}],
 )
-# Response includes thinking block (reasoning) + text block (answer)
-for block in response.content:
+for block in resp.content:                   # select by type: a thinking block can come first
     if block.type == "thinking":
-        print(f"Reasoning: {block.thinking}")
+        log.debug(block.thinking)            # summary only; raw reasoning is never returned
     elif block.type == "text":
-        print(f"Answer: {block.text}")
+        print(block.text)
 ```
 
+## The Pattern: OpenAI reasoning effort
+
 ```python
-# Traditional CoT with explicit instructions
 from openai import OpenAI
 
 client = OpenAI()
+result = client.responses.create(
+    model="gpt-6-astra",
+    reasoning={"effort": "high"},
+    input=f"Determine the quarterly growth rate and flag anomalies.\n\n{data}",
+)
+print(result.output_text)
+```
 
-COT_PROMPT = """You are an expert data analyst.
+## The Pattern: Manual CoT (fallback when thinking is off)
 
-## Task
-Analyze the following financial data and determine the quarterly growth rate.
+```python
+COT_PROMPT = """Analyze the financial data below and determine the quarterly growth rate.
+Work through the problem before answering, then put only the final number in <answer> tags.
 
-## Instructions
-Think through this step by step:
-1. Identify the revenue for each quarter
-2. Calculate the difference between consecutive quarters
-3. Compute the percentage change
-4. Provide the final growth rate
-
-## Important
-Show your reasoning for each step before giving the final answer.
-
-## Data
+<data>
 {data}
+</data>"""
 
-## Output Format
-Return JSON: {{"steps": ["..."], "final_answer": <float>, "confidence": <float>}}
-"""
-
-def analyze_with_cot(data: str) -> dict:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        temperature=0.0,
-        messages=[
-            {"role": "system", "content": "You reason step by step before answering."},
-            {"role": "user", "content": COT_PROMPT.format(data=data)}
-        ],
-        response_format={"type": "json_object"}
-    )
-    return response.choices[0].message.content
+def growth_rate(llm, data: str) -> float:
+    text = llm(COT_PROMPT.format(data=data))            # a model or route without native thinking
+    return float(text.split("<answer>")[1].split("</answer>")[0])
 ```
 
 ## Quick Reference
 
-| Variant | When to Use | Accuracy | Cost |
-|---------|-------------|----------|------|
-| Zero-shot CoT | Simple reasoning, add "think step by step" | +20-30% | Low |
-| Few-shot CoT | Complex logic, provide worked examples | +25-40% | Medium |
-| Self-consistency | High-stakes, sample N paths then vote | +10-15% over CoT | High |
-| ReAct | Tool use, multi-step research | +30-50% | High |
-| Extended Thinking (Claude) | Complex reasoning, coding, analysis | +30-50% | Medium |
+| Situation | Approach |
+|-----------|----------|
+| Claude Opus 5.5 / Fable 5.1 | Thinking always on; tune `effort` (`low` for routine, `high`/`xhigh` for hard work) |
+| Claude Sonnet 5.5 / Haiku 5.5 | Thinking on by default; lower `effort` instead of disabling |
+| Older Claude (Haiku 4.5, pre-4.6) | `thinking={"type": "enabled", "budget_tokens": N}` still applies there only |
+| OpenAI GPT-6 family | `reasoning={"effort": ...}` |
+| Model or route without thinking | Manual CoT with the answer isolated in tags |
+| Tool use, multi-step research | Agent frameworks implement ReAct-style loops; don't hand-write Thought/Action/Observation |
+| Simple lookups, classification | Low effort; no CoT instructions |
 
-## ReAct Pattern (Reason + Act)
+## Self-Consistency
 
-```python
-REACT_PROMPT = """Answer the question using the following format:
-
-Thought: I need to figure out...
-Action: search("query") or calculate("expression")
-Observation: [result of action]
-...repeat Thought/Action/Observation...
-Thought: I now have enough information
-Final Answer: [the answer]
-
-Question: {question}"""
-
-# ReAct is now built into agent frameworks (LangGraph, Claude Agent SDK)
-# The manual prompt pattern above is for understanding -- use frameworks in production
-```
-
-## When NOT to Use CoT
-
-- Simple lookups or classifications (adds unnecessary tokens)
-- When latency is critical and accuracy is already high
-- For tasks with single-step answers (e.g., sentiment: positive/negative)
-
-## Self-Consistency Extension
+Sample several independent answers and take the majority. Current Claude models reject `temperature`, so variety comes
+from independent calls (different few-shot orderings or phrasings), not from sampling knobs:
 
 ```python
-import json
 from collections import Counter
 
-def cot_with_self_consistency(prompt: str, n_samples: int = 5) -> str:
-    """Sample multiple CoT paths, return majority answer."""
-    answers = []
-    for _ in range(n_samples):
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.7,  # Higher temp for diverse paths
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(response.choices[0].message.content)
-        answers.append(result.get("final_answer"))
-    most_common = Counter(answers).most_common(1)[0][0]
-    return most_common
+def self_consistent(ask, prompt_variants: list[str]) -> str:
+    """ask(prompt) -> final answer string; one call per variant."""
+    answers = [ask(p) for p in prompt_variants]
+    return Counter(answers).most_common(1)[0][0]
+```
+
+Use it only for high-stakes, short answers; it multiplies cost by the number of samples.
+
+## Common Mistakes
+
+### Wrong
+
+```python
+# Prescriptive steps + reasoning in the output + a thinking budget the model rejects
+prompt = """Think step by step inside <thinking> tags:
+1. First identify ... 2. Then compute ... 3. Finally ..."""
+client.messages.create(model="claude-sonnet-5-5", max_tokens=8000,
+                       thinking={"type": "enabled", "budget_tokens": 4000},   # 400 on 5.x models
+                       messages=[{"role": "user", "content": prompt}])
+```
+
+### Correct
+
+```python
+client.messages.create(
+    model="claude-sonnet-5-5", max_tokens=16000,
+    output_config={"effort": "high"},
+    messages=[{"role": "user", "content": "Compute the growth rate. Check the result against the raw totals "
+                                          "before you finish.\n\n" + data}],
+)
 ```
 
 ## Related
 
 - [Structured Extraction](../concepts/structured-extraction.md)
 - [Validation Prompts](../patterns/validation-prompts.md)
-- [Multi-Pass Extraction](../patterns/multi-pass-extraction.md)
+- [Claude API Surface](../../genai/concepts/anthropic-api-surface.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices
+- https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
+- https://platform.claude.com/docs/en/build-with-claude/effort
+- https://developers.openai.com/api/docs/guides/code-generation

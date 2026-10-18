@@ -46,7 +46,8 @@ color: green
 │                                                                      │
 │  1. KB CHECK (project-specific patterns)                            │
 │     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/{domain}/patterns/*.md → Style patterns    │
-│     └─ Read: .claude/CLAUDE.md → Project conventions                │
+│     └─ Read: ${CLAUDE_PLUGIN_ROOT}/kb/python/concepts/python-versions.md         │
+│     └─ Read: .claude/CLAUDE.md, pyproject.toml → runtime target    │
 │     └─ Grep: Existing codebase patterns → Comment styles            │
 │                                                                      │
 │  2. COMMENT CLASSIFICATION                                           │
@@ -125,15 +126,25 @@ color: green
 
 **Triggers:** Code uses outdated patterns
 
-**Modern Features (Python 3.9+):**
+**Step 1 -- automate first.** This agent has no shell, so put the command in the response for the
+caller to run before (or instead of) manual edits:
+`ruff check --select UP,F401,I --fix .` with `target-version` set to the **deployment runtime**
+(ruff's pyupgrade rules then never suggest syntax the runtime lacks).
 
-| Old Pattern | Modern Pattern |
-|-------------|----------------|
-| `List[str]` | `list[str]` |
-| `Optional[str]` | `str \| None` (3.10+) |
-| if/elif chains | `match/case` (3.10+) |
-| `for i in range(len(items))` | `for i, item in enumerate(items)` |
-| `if len(items) == 0` | `if not items` |
+**Step 2 -- manual modernization, never above the runtime's Python (e.g. 3.12 on Databricks Runtime 17.3 LTS):**
+
+| Old Pattern | Modern Pattern | Min Python |
+|-------------|----------------|------------|
+| `List[str]`, `Dict[str, int]` | `list[str]`, `dict[str, int]` | 3.9 |
+| `Optional[str]`, `Union[A, B]` | `str \| None`, `A \| B` | 3.10 |
+| if/elif chains on structure | `match/case` | 3.10 |
+| `T = TypeVar("T")` + `Generic[T]` | `def f[T](x: T) -> T`, `class Box[T]:` | 3.12 |
+| `X: TypeAlias = ...` | `type X = ...` | 3.12 |
+| manual chunking loop | `itertools.batched(items, n)` | 3.12 |
+| `datetime.utcnow()` | `datetime.now(UTC)` | 3.11 (`datetime.UTC`) |
+| `except (A, B):` | keep it -- `except A, B:` is 3.14+ only | -- |
+| `for i in range(len(items))` | `for i, item in enumerate(items)` | any |
+| `if len(items) == 0` | `if not items` | any |
 
 ### Capability 4: SQL & dbt Cleaning
 
@@ -220,6 +231,7 @@ PRE-FLIGHT CHECK
 ├─ [ ] All algorithm explanations kept
 ├─ [ ] Only WHAT comments removed
 ├─ [ ] Public APIs unchanged
+├─ [ ] No syntax newer than the runtime's Python
 ├─ [ ] Code still runs correctly
 └─ [ ] Metrics reported (LOC, comment ratio)
 ```
@@ -246,7 +258,8 @@ PRE-FLIGHT CHECK
 **Transformations Applied:**
 - Removed {n} redundant comments
 - Applied {n} guard clause refactors
-- Updated to Python 3.9+ patterns
+- Updated to Python {target} patterns (target = deployment runtime)
+- Suggested: `ruff check --select UP,F401,I --fix .` (target-version {pyXY})
 
 **Metrics:**
 - LOC: {before} → {after} (-{percent}%)
@@ -259,6 +272,16 @@ PRE-FLIGHT CHECK
 
 **Confidence:** {score} | **Source:** KB: {pattern} or Codebase: {file}
 ```
+
+---
+
+## Sources
+
+- https://docs.astral.sh/ruff/rules/
+- https://docs.python.org/3/library/itertools.html
+- https://docs.python.org/3/library/datetime.html
+- https://docs.python.org/3.14/whatsnew/3.14.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
 
 ---
 

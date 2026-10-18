@@ -1,7 +1,10 @@
 # Medallion Architecture Knowledge Base
 
-> **Purpose**: Bronze/Silver/Gold layered data architecture for lakehouses, data quality, schema evolution, incremental loading, AI-era extensions
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Bronze/Silver/Gold layered architecture for lakehouses — layer purpose, ingestion with `_metadata`, quality per layer, schema evolution without `overwriteSchema`, incremental loading, AI-era extensions
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
+
+The medallion architecture is a **recommended best practice, not a requirement** (Databricks). Layers are defined by purpose: Bronze = raw ingestion, Silver = cleaning and validation, Gold = dimensional modeling and aggregation, possibly with several Gold layers per business domain.
 
 ## Quick Navigation
 
@@ -9,19 +12,19 @@
 
 | File | Purpose |
 |------|---------|
-| [concepts/bronze-layer.md](concepts/bronze-layer.md) | Raw ingestion layer -- append-only, schema-on-read |
-| [concepts/silver-layer.md](concepts/silver-layer.md) | Cleansed/conformed layer -- deduplicated, typed, validated |
-| [concepts/gold-layer.md](concepts/gold-layer.md) | Business aggregation layer -- star schemas, KPIs, SCD |
-| [concepts/domain-modeling.md](concepts/domain-modeling.md) | Domain-driven design applied to data mesh and lakehouse |
+| [concepts/bronze-layer.md](concepts/bronze-layer.md) | Raw ingestion — append, string/VARIANT fields, `_metadata` provenance, Auto Loader, Kafka |
+| [concepts/silver-layer.md](concepts/silver-layer.md) | Cleansed, deduplicated records — streaming reads of Bronze, MERGE, `AUTO CDC` SCD2 |
+| [concepts/gold-layer.md](concepts/gold-layer.md) | Dimensional models and aggregates — materialized views, DDL-owned schemas, semantic layer |
+| [concepts/domain-modeling.md](concepts/domain-modeling.md) | Domain-driven organization, UC hierarchy, contracts and governed tags |
 
 ### Patterns (< 200 lines each)
 
 | File | Purpose |
 |------|---------|
-| [patterns/layer-transitions.md](patterns/layer-transitions.md) | Bronze to Silver to Gold transformation flow |
-| [patterns/data-quality-gates.md](patterns/data-quality-gates.md) | Quality checks and quarantine between layers |
-| [patterns/schema-evolution.md](patterns/schema-evolution.md) | Schema evolution strategy with Delta Lake |
-| [patterns/incremental-loading.md](patterns/incremental-loading.md) | Incremental/merge patterns with MERGE INTO |
+| [patterns/layer-transitions.md](patterns/layer-transitions.md) | Bronze → Silver → Gold flow with orchestration |
+| [patterns/data-quality-gates.md](patterns/data-quality-gates.md) | Quality per layer, quarantine, expectations and constraints |
+| [patterns/schema-evolution.md](patterns/schema-evolution.md) | Add/rename/widen/drop safely; defaults; why not `overwriteSchema` |
+| [patterns/incremental-loading.md](patterns/incremental-loading.md) | Streaming reads, MERGE, change data feed, Auto Loader |
 
 ### Specs (Machine-Readable)
 
@@ -41,13 +44,13 @@
 
 | Concept | Description |
 |---------|-------------|
-| **Bronze Layer** | Raw, append-only ingestion preserving source fidelity with metadata columns |
-| **Silver Layer** | Cleansed, deduplicated, conformed data with enforced schemas and SCD Type 1/2 |
-| **Gold Layer** | Business-level aggregates, star schemas, and pre-computed KPIs for consumption |
-| **Domain Modeling** | Organizing lakehouse tables by business domains rather than technical layers |
-| **Quality Gates** | Automated data quality checks that quarantine bad records between layers |
-| **AI Extensions** | Feature layer and vector layer extending medallion for ML/AI workloads (2025+) |
-| **Contracts as Code** | Medallion is a set of contracts, not just a pipeline — enforce at every boundary |
+| **Bronze Layer** | Raw, append-only ingestion preserving source fidelity; minimal validation; provenance via `_metadata` |
+| **Silver Layer** | Validated, non-aggregated records: dedup, late data, casting, joins; SCD history often kept here |
+| **Gold Layer** | Dimensional models and aggregates per domain; materialized views; semantic layer on top |
+| **Domain Modeling** | Organizing tables by business domain and ownership |
+| **Quality per layer** | Structural checks in Bronze, business rules and quarantine in Silver, reconciliation in Gold — Databricks-native details in [databricks-data-quality](../data-quality/concepts/databricks-data-quality.md) |
+| **Schema as contract** | Bronze evolves automatically; Silver/Gold change only through explicit DDL |
+| **AI Extensions** | Feature, vector and semantic layers built from certified Silver/Gold data |
 
 ---
 
@@ -66,5 +69,10 @@
 | Agent | Primary Files | Use Case |
 |-------|---------------|----------|
 | medallion-architect | All concepts + layer-transitions | Designing lakehouse layer architecture |
-| data-quality-engineer | data-quality-gates, silver-layer | Implementing quality checks and validation |
-| lakehouse-engineer | incremental-loading, schema-evolution | Building production ETL pipelines |
+| data-quality-analyst | data-quality-gates, silver-layer | Implementing quality checks and validation |
+| lakehouse-architect | incremental-loading, schema-evolution | Table formats, layout and evolution |
+| lakeflow-pipeline-builder | bronze-layer, silver-layer | Implementing layers as Lakeflow pipelines |
+
+## Sources
+
+- https://docs.databricks.com/aws/en/lakehouse/medallion

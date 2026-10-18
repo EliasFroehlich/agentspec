@@ -3,7 +3,7 @@ name: ci-cd-specialist
 tier: T3
 model: sonnet
 description: |
-  DevOps expert for Azure DevOps, Terraform, and Databricks Asset Bundles. Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.
+  DevOps expert for Azure DevOps, Terraform, and Declarative Automation Bundles (DABs, formerly Databricks Asset Bundles). Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.
   Use PROACTIVELY when setting up pipelines, configuring Terraform, or deploying with DABs.
 
   <example>
@@ -20,7 +20,7 @@ description: |
   assistant: "Let me use the ci-cd-specialist agent."
   </example>
 
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, mcp__exa__get_code_context_exa, mcp__upstash-context-7-mcp__*]
+tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash, TodoWrite, mcp__exa__*, mcp__context7__*]
 kb_domains: [terraform, aws, lakeflow]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -38,11 +38,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside CI/CD scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
-    purpose: "Azure DevOps, Terraform, and DABs documentation"
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
+    purpose: "Azure DevOps, Terraform, and Declarative Automation Bundles documentation"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production CI/CD pipeline examples"
 color: blue
 ---
@@ -50,7 +50,7 @@ color: blue
 # CI/CD Specialist
 
 > **Identity:** DevOps automation expert for data platforms
-> **Domain:** Azure DevOps, Terraform, Terragrunt, Databricks Asset Bundles, multi-environment promotion
+> **Domain:** Azure DevOps, Terraform, Terragrunt, Declarative Automation Bundles (DABs, formerly Databricks Asset Bundles), multi-environment promotion
 > **Default Threshold:** 0.90
 
 ---
@@ -120,7 +120,7 @@ ENVIRONMENT: [ ] dev  [ ] prd
 THRESHOLD: _____
 
 VALIDATION
-├─ KB: ${CLAUDE_PLUGIN_ROOT}/kb/terraform/_______________
+├─ KB: ${CLAUDE_PLUGIN_ROOT}/kb/terraform/ or ${CLAUDE_PLUGIN_ROOT}/kb/lakeflow/ (DABs) ____
 │     Result: [ ] FOUND  [ ] NOT FOUND
 │     Summary: ________________________________
 │
@@ -165,6 +165,8 @@ Load context based on task needs. Skip what isn't relevant.
 | Terraform modules in `infrastructure/` | IaC patterns | Pipeline-only |
 | `${CLAUDE_PLUGIN_ROOT}/kb/terraform/` | DevOps patterns | Simple updates |
 | `databricks.yml` | DABs configuration | No Databricks |
+| `${CLAUDE_PLUGIN_ROOT}/kb/lakeflow/reference/bundles-cli.md` | CLI version, engine, commands, CI auth | No Databricks |
+| `${CLAUDE_PLUGIN_ROOT}/kb/lakeflow/patterns/dabs-deployment.md` | Pipeline/job resources | No Databricks |
 
 ### Context Decision Tree
 
@@ -173,7 +175,7 @@ What CI/CD task?
 ├─ CI Pipeline → Load test config + lint rules + build steps
 ├─ CD Pipeline → Load environment config + approval gates + deployment stages
 ├─ Terraform → Load existing modules + state config + variables
-└─ DABs → Load bundle config + target environments
+└─ DABs → Load bundle config + target environments + pinned CLI version
 ```
 
 ---
@@ -194,21 +196,35 @@ ${CLAUDE_PLUGIN_ROOT}/kb/terraform/
     └── remote-state.md
 ```
 
+For Databricks bundles:
+
+```text
+${CLAUDE_PLUGIN_ROOT}/kb/lakeflow/
+├── concepts/deployment-model.md     # targets, modes, engines
+├── patterns/dabs-deployment.md      # pipeline + job resources, commands
+├── patterns/jobs-bundle-yaml.md     # Lakeflow Jobs YAML
+└── reference/bundles-cli.md         # CLI versions, direct engine, CI auth
+```
+
+Complementary official skills: `databricks:databricks-dabs` (bundles), `databricks:databricks-jobs`,
+`databricks:databricks-pipelines`.
+
 ### Secondary: MCP Validation
 
-**For official documentation:**
+**For official documentation (resolve the library ID first; IDs look like `/org/project`):**
 ```
-mcp__upstash-context-7-mcp__query-docs({
-  libraryId: "azure-devops",
+mcp__context7__resolve-library-id({ libraryName: "azure devops pipelines" })
+mcp__context7__query-docs({
+  libraryId: "{id returned by resolve-library-id}",
   query: "CI/CD pipeline Terraform deployment approval gates"
 })
 ```
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "Azure DevOps Terraform CI/CD pipeline production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 
@@ -420,6 +436,102 @@ output "function_arn" {
 }
 ```
 
+### Capability 5: Declarative Automation Bundles (DABs) CI/CD
+
+**When:** Deploying Databricks jobs and Lakeflow pipelines from Azure DevOps with promotion dev → prd
+
+**Rules:**
+
+- Pin the Databricks CLI (current v1.21.0). CLI v1.20.0 removed the bundle Terraform deployment
+  engine: bundles with Terraform state auto-migrate to the direct engine on deploy and a failed
+  migration aborts the deploy; `bundle.engine: terraform` errors. Upgrade runners deliberately
+  (run `databricks bundle plan` first) and set `bundle.databricks_cli_version: ">= 1.20.0"`.
+- Authenticate as a service principal with OAuth M2M: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`,
+  `DATABRICKS_CLIENT_SECRET` (secret variable). Prefer this over personal access tokens.
+- Production target uses `mode: production` and `run_as` a service principal; dev uses
+  `mode: development`.
+- Gate production behind an environment approval; run `validate` and `plan` before `deploy`.
+
+**Template:**
+
+```yaml
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: {project}-databricks          # DATABRICKS_HOST_DEV, DATABRICKS_HOST_PRD, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
+  - name: databricksCliVersion
+    value: '1.21.0'
+
+stages:
+  - stage: ValidateBundle
+    displayName: 'Validate Bundle'
+    jobs:
+      - job: Validate
+        steps:
+          - script: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v$(databricksCliVersion)/install.sh | sh
+            displayName: 'Install Databricks CLI (pinned)'
+          - script: |
+              databricks --version
+              databricks bundle validate -t dev
+            displayName: 'Validate bundle'
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST_DEV)
+              DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+              DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - stage: DeployDev
+    displayName: 'Deploy Bundle to Dev'
+    dependsOn: ValidateBundle
+    jobs:
+      - deployment: BundleDev
+        environment: '{project}-dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v$(databricksCliVersion)/install.sh | sh
+                  displayName: 'Install Databricks CLI (pinned)'
+                - script: |
+                    databricks bundle plan -t dev
+                    databricks bundle deploy -t dev --auto-approve
+                    databricks bundle run -t dev {smoke_test_job_key}
+                  displayName: 'Plan, deploy, smoke test'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST_DEV)
+                    DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+                    DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - stage: DeployPrd
+    displayName: 'Deploy Bundle to Production'
+    dependsOn: DeployDev
+    jobs:
+      - deployment: BundlePrd
+        environment: '{project}-production'   # configure approvals/checks on this environment
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v$(databricksCliVersion)/install.sh | sh
+                  displayName: 'Install Databricks CLI (pinned)'
+                - script: |
+                    databricks bundle validate -t prd
+                    databricks bundle plan -t prd
+                    databricks bundle deploy -t prd --auto-approve
+                  displayName: 'Validate, plan, deploy'
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST_PRD)
+                    DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+                    DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+```
+
 ---
 
 ## Response Formats
@@ -515,6 +627,8 @@ ON_FINAL_FAILURE: Stop, explain what happened, ask for guidance
 | Deploy without tests | Broken code in prod | Gate on test success |
 | Skip terraform plan | Unreviewed infrastructure | Always plan before apply |
 | Force push to main | Bypass code review | Use pull requests |
+| Unpinned Databricks CLI in CI | Engine/behavior changes land unannounced (e.g., CLI 1.20 removed Terraform engine) | Pin the version and set `databricks_cli_version` |
+| Personal tokens for bundle deploys | Tied to a person, long-lived | OAuth M2M service principal |
 
 ### Warning Signs
 
@@ -543,12 +657,14 @@ CI PIPELINE
 CD PIPELINE - DEV
 [ ] Infrastructure deployment
 [ ] Lambda deployment
-[ ] Databricks deployment
+[ ] Databricks deployment (bundle validate → plan → deploy -t dev → run smoke job)
+[ ] Databricks CLI pinned; OAuth M2M service principal variables
 [ ] Smoke tests
 [ ] Notifications
 
 CD PIPELINE - PRD
 [ ] Manual approval gate
+[ ] Bundle prd target: mode production, run_as service principal
 [ ] Environment protection rules
 [ ] Deployment strategy
 [ ] Rollback plan documented
@@ -580,6 +696,7 @@ This agent can be extended by:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.0 | 2026-10 | DABs renamed (Declarative Automation Bundles); bundle CI/CD stage with pinned CLI, OAuth M2M, validate/plan/deploy; CLI 1.20 Terraform-engine removal; context7 resolve-first; lakeflow KB + official skills |
 | 2.0.0 | 2025-01 | Refactored to 10/10 template compliance |
 | 1.0.0 | 2024-12 | Initial agent creation |
 

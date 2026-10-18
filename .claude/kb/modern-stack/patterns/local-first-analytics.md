@@ -1,86 +1,63 @@
 # Local-First Analytics
 
-> **Purpose**: Replace cloud warehouse / Spark for sub-500GB workloads using DuckDB + Evidence.dev, with cost comparison and CI pipeline patterns
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Run single-node analytics with DuckDB + Polars + Parquet (optionally DuckLake) instead of a cluster or warehouse, with CI validation and a code-first reporting layer
+> **Confidence**: MEDIUM
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Analytical workloads under 500GB where Spark or a cloud warehouse is overkill
-- Teams wanting instant local iteration without warehouse credentials
-- CI/CD pipelines that need fast, zero-infrastructure data validation
-- BI dashboards backed by Git-versioned SQL (Evidence.dev)
-- Cost-sensitive environments replacing always-on Snowflake/Databricks compute
+- Analytical workloads that fit one machine (RAM plus local disk spill), where a cluster or warehouse is overhead
+- Teams that want fast local iteration without warehouse credentials
+- CI pipelines that need zero-infrastructure data validation
+- Reports versioned in git next to the SQL that feeds them
 
 ## Decision Framework
 
 ```text
-Dataset Size        Recommended Stack
-─────────────────────────────────────────────
-< 1 GB              DuckDB in-process (single script)
-1 GB – 50 GB        DuckDB + Polars (lazy eval)
-50 GB – 500 GB      DuckDB on S3 + Evidence.dev dashboards
-> 500 GB            Spark / cloud warehouse (leave local-first)
+Workload shape                                   Starting point
+───────────────────────────────────────────────────────────────────────────
+Ad-hoc / one script                              DuckDB in-process
+Python transforms, larger-than-RAM files         Polars LazyFrame (2.0: streaming + spill by default)
+Shared, versioned tables for a small team        DuckLake (SQLite or PostgreSQL catalog) + Parquet
+Many concurrent writers / distributed compute    Spark, a warehouse, or a lakehouse platform
 ```
 
-## Cost Comparison
+These are starting points, not thresholds. Benchmark representative queries on your own data before you decide.
 
-| Stack | Monthly Cost (100GB daily scan) | Latency | Infrastructure |
-|-------|-------------------------------|---------|----------------|
-| Snowflake (XS warehouse) | ~$400–800 | 2–10s | Managed |
-| Databricks (Jobs Lite) | ~$300–600 | 3–15s | Managed |
-| BigQuery (on-demand) | ~$500 | 1–5s | Serverless |
-| **DuckDB + Evidence.dev** | **$0 (local) / ~$20 (CI)** | **<1s** | **None** |
+## Cost Model
+
+A local or CI run costs only the machine it runs on. A managed platform bills for compute and storage. Compare on your own workload with each vendor's current price list:
+
+| Option | Billing model | Official pricing (check before quoting) |
+|--------|---------------|------------------------------------------|
+| BigQuery on-demand | Per TiB scanned: $6.25/TiB after the first free TiB per month (list price on the pricing page as of 2026-10-17) | https://cloud.google.com/bigquery/pricing |
+| Snowflake | Credits per warehouse-second + storage | https://www.snowflake.com/en/pricing-options/ |
+| Databricks | DBUs by compute type (Jobs, SQL, serverless) | https://www.databricks.com/product/pricing |
+| DuckDB / Polars | Free (MIT) software; you pay for the host or CI runner | — |
+
+Price a managed option with the compute type you would actually use (for example Databricks Jobs compute or serverless jobs), in your region, on the date you decide.
 
 ## Implementation
 
-### DuckDB + Evidence.dev Dashboard Pipeline
-
-```yaml
-# evidence-project/evidence.config.yaml
-name: local-analytics
-database:
-  type: duckdb
-  path: data/analytics.duckdb
-```
-
-```sql
--- evidence-project/pages/revenue/index.md (Evidence SQL block)
--- Revenue dashboard backed by local Parquet files
-
-SELECT
-    DATE_TRUNC('month', order_date) AS month,
-    segment,
-    SUM(net_amount) AS revenue,
-    COUNT(DISTINCT customer_id) AS unique_customers,
-    SUM(net_amount) / COUNT(DISTINCT customer_id) AS revenue_per_customer
-FROM read_parquet('data/orders/*.parquet')
-GROUP BY 1, 2
-ORDER BY 1 DESC, 3 DESC;
-```
-
-### Python Pipeline: DuckDB + Polars + Parquet
+### Python Pipeline: DuckDB → Polars → Parquet
 
 ```python
 import duckdb
 import polars as pl
 from pathlib import Path
 
-# ============================================================
-# Extract: DuckDB reads raw files (S3 or local)
-# ============================================================
 con = duckdb.connect()
-con.execute("INSTALL httpfs; LOAD httpfs;")
+# S3 credentials via a secret; credential_chain needs AWS creds in the environment
+con.sql("CREATE OR REPLACE SECRET s3_default (TYPE s3, PROVIDER credential_chain)")
 
+# Extract: DuckDB reads raw files and hands a Polars DataFrame over Arrow
 raw = con.sql("""
     SELECT *
-    FROM read_parquet('s3://data-lake/raw/events/**/*.parquet',
-                      hive_partitioning=true)
-    WHERE event_date >= '2026-03-01'
-""").pl()  # → Polars DataFrame (zero-copy via Arrow)
+    FROM read_parquet('s3://my-bucket/raw/events/**/*.parquet', hive_partitioning = true)
+    WHERE event_date >= DATE '2026-03-01'
+""").pl()
 
-# ============================================================
-# Transform: Polars lazy pipeline (optimized execution)
-# ============================================================
+# Transform: Polars lazy pipeline (collect() uses the streaming engine in Polars 2.0)
 result = (
     raw.lazy()
     .filter(pl.col("event_type").is_in(["purchase", "subscription"]))
@@ -93,22 +70,28 @@ result = (
         pl.col("revenue").sum().alias("total_revenue"),
         pl.col("event_type").n_unique().alias("event_types"),
     )
-    .sort("total_revenue", descending=True)
+    .sort("total_revenue", descending=True)   # explicit order: 2.0 does not keep group order
     .collect()
 )
 
-# ============================================================
-# Load: Write optimized Parquet for Evidence.dev
-# ============================================================
-output = Path("evidence-project/data")
-output.mkdir(parents=True, exist_ok=True)
-
-result.write_parquet(
-    output / "customer_revenue.parquet",
-    compression="zstd",
-    row_group_size=100_000,
-)
+# Load: write Parquet for the reporting layer
+out = Path("output/marts")
+out.mkdir(parents=True, exist_ok=True)
+result.write_parquet(out / "customer_revenue.parquet", compression="zstd")
 ```
+
+### Shared Layer: DuckLake Instead of Loose Files (DuckDB 1.5.2+)
+
+```sql
+INSTALL ducklake;
+-- PostgreSQL catalog for several users; data files on object storage
+ATTACH 'ducklake:postgres:dbname=ducklake_catalog host=localhost' AS lake
+    (DATA_PATH 's3://my-bucket/lake/');
+CREATE TABLE lake.customer_revenue AS
+    SELECT * FROM 'output/marts/customer_revenue.parquet';
+```
+
+The catalog gives ACID commits, snapshots and time travel over the same Parquet files. See [duckdb-patterns](duckdb-patterns.md) for the catalog options.
 
 ### CI Pipeline: Data Validation Without a Warehouse
 
@@ -123,93 +106,71 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install DuckDB CLI
+      - name: Install DuckDB CLI (official install script)
         run: |
-          curl -fsSL https://install.duckdb.org | sh
+          curl https://install.duckdb.org | bash
+          echo "$HOME/.duckdb/cli/latest" >> "$GITHUB_PATH"
 
       - name: Run data assertions
-        run: |
-          duckdb < tests/assertions.sql
-
-      - name: Build Evidence dashboards
-        run: |
-          cd evidence-project
-          npm install
-          npm run build  # fails on SQL errors
+        run: duckdb -bail < tests/assertions.sql   # error() => non-zero exit
 ```
 
 ```sql
--- tests/assertions.sql
--- Fast, zero-infrastructure data validation
+-- tests/assertions.sql: each check raises via error() when it fails
+SELECT CASE WHEN count(*) > 0 THEN error('null order_id') END
+FROM read_parquet('data/orders/*.parquet') WHERE order_id IS NULL;
 
--- Assert: no null primary keys
-SELECT COUNT(*) AS null_keys
-FROM read_parquet('data/orders/*.parquet')
-WHERE order_id IS NULL
-HAVING COUNT(*) > 0;
--- Returns rows only on failure → non-zero exit code
+SELECT CASE WHEN count(*) > 0 THEN error('orders without customer') END
+FROM read_parquet('data/orders/*.parquet') AS o
+ANTI JOIN read_parquet('data/customers/*.parquet') AS c USING (customer_id);
 
--- Assert: referential integrity
-SELECT COUNT(*) AS orphan_orders
-FROM read_parquet('data/orders/*.parquet') o
-LEFT JOIN read_parquet('data/customers/*.parquet') c
-    ON o.customer_id = c.customer_id
-WHERE c.customer_id IS NULL
-HAVING COUNT(*) > 0;
+SELECT CASE WHEN count(*) > 0 THEN error('future order_date') END
+FROM read_parquet('data/orders/*.parquet') WHERE order_date > current_date;
 
--- Assert: no future dates
-SELECT COUNT(*) AS future_dates
-FROM read_parquet('data/orders/*.parquet')
-WHERE order_date > CURRENT_DATE
-HAVING COUNT(*) > 0;
-
--- Assert: revenue within expected bounds
-SELECT COUNT(*) AS outliers
-FROM read_parquet('data/orders/*.parquet')
-WHERE net_amount < 0 OR net_amount > 1000000
-HAVING COUNT(*) > 0;
+SELECT CASE WHEN count(*) > 0 THEN error('net_amount out of bounds') END
+FROM read_parquet('data/orders/*.parquet') WHERE net_amount < 0 OR net_amount > 1000000;
 ```
 
-### Replacing Spark for Small-Medium Workloads
+### Replacing a Small Spark Job
 
 ```python
-# Before: Spark (heavy, slow startup, cluster needed)
-# from pyspark.sql import SparkSession
-# spark = SparkSession.builder.getOrCreate()
-# df = spark.read.parquet("data/events/")
-# result = df.groupBy("customer_id").agg(sum("amount"))
+# Before (Spark): session startup + cluster for a single-node-sized job
+# df = spark.read.parquet("data/events/"); df.groupBy("customer_id").agg(F.sum("amount"))
 
-# After: DuckDB (instant, zero infrastructure)
 import duckdb
 
 result = duckdb.sql("""
-    SELECT customer_id, SUM(amount) AS total
-    FROM read_parquet('data/events/**/*.parquet', hive_partitioning=true)
+    SELECT customer_id, sum(amount) AS total
+    FROM read_parquet('data/events/**/*.parquet', hive_partitioning = true)
     GROUP BY customer_id
     ORDER BY total DESC
-""").df()
-
-# Performance comparison (100GB Parquet, M2 MacBook):
-# Spark local:  ~45s startup + ~30s query = ~75s
-# DuckDB:       ~0s startup  + ~12s query = ~12s
+""").pl()   # or .df() for pandas, .arrow() for Arrow
 ```
+
+### Reporting Layer Options
+
+| Tool | Fit for a DuckDB/Parquet stack |
+|------|--------------------------------|
+| Malloy (+ Publisher) | Semantic models over DuckDB files; serve them over REST/MCP |
+| Observable Framework | Data loaders (Python/SQL) precompute snapshots; static hosting |
+| Evidence Core | One warehouse per project via a direct connector; check DuckDB support before choosing it |
 
 ## Configuration
 
 | Tool | Role | Install |
 |------|------|---------|
-| DuckDB | SQL engine on local/S3 files | `pip install duckdb` or `brew install duckdb` |
-| Polars | DataFrame transforms (lazy eval) | `pip install polars` |
-| Evidence.dev | Git-versioned BI dashboards | `npx degit evidence-dev/template my-report` |
-| dbt-duckdb | dbt adapter for local dev | `pip install dbt-duckdb` |
-| SQLMesh | Model framework with DuckDB default | `pip install sqlmesh` |
+| DuckDB | SQL engine on local/S3 files | `pip install duckdb` (LTS: `pip install duckdb==1.4.5`) or `curl https://install.duckdb.org \| bash` |
+| Polars | DataFrame transforms | `pip install polars` (2.0 defaults differ from 1.x) |
+| SQLMesh | Model framework, DuckDB engine | `pip install sqlmesh` then `sqlmesh init duckdb` |
+| dbt + DuckDB | dbt models on DuckDB | dbt v2: adapter built in; dbt v1: `pip install dbt-duckdb` |
 
 ## Anti-Patterns
 
-- **Running DuckDB on 1TB+ datasets** — beyond the sweet spot; use Spark or a warehouse
-- **Sharing a DuckDB file across processes** — single-writer; use Parquet files as the shared layer
-- **Skipping Parquet in favor of CSV** — CSV lacks schema, compression, and predicate pushdown
-- **Not setting `hive_partitioning=true`** — miss partition pruning on directory-structured data
+- **Hard-coded size thresholds** taken from blog posts. Measure your own queries and memory.
+- **Several processes writing one `.duckdb` file.** One read-write process per file; share Parquet or use DuckLake.
+- **CSV as the shared layer.** No schema, no compression, no predicate pushdown; use Parquet.
+- **Skipping `hive_partitioning = true`** on directory-partitioned data. You lose partition pruning.
+- **Asserting with "returns rows on failure".** Rows do not fail a CLI run; use `error()`.
 
 ## See Also
 
@@ -217,4 +178,20 @@ result = duckdb.sql("""
 - [polars-patterns](../patterns/polars-patterns.md)
 - [duckdb](../concepts/duckdb.md)
 - [polars](../concepts/polars.md)
+- [analytics-engineering](../concepts/analytics-engineering.md)
 - [cost-optimization](../../cloud-platforms/patterns/cost-optimization.md)
+
+## Sources
+
+- https://duckdb.org/docs/current/operations_manual/installing_duckdb/install_script.html
+- https://duckdb.org/docs/current/core_extensions/httpfs/s3api
+- https://duckdb.org/docs/current/sql/functions/utility.html
+- https://duckdb.org/docs/current/clients/cli/arguments.html
+- https://duckdb.org/docs/current/connect/concurrency.html
+- https://ducklake.select/docs/stable/duckdb/usage/choosing_a_catalog_database
+- https://docs.pola.rs/releases/upgrade/2/
+- https://docs.getdbt.com/docs/core/connect-data-platform/duckdb-setup
+- https://docs.evidence.dev/migration-guide
+- https://cloud.google.com/bigquery/pricing
+- https://www.databricks.com/product/pricing
+- https://www.snowflake.com/en/pricing-options/

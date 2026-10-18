@@ -1,15 +1,16 @@
 # pytest Basics
 
-> **Purpose**: Core pytest 8+ conventions, test discovery, markers, async, and CLI usage
+> **Purpose**: Core pytest 9 conventions -- discovery, markers, expected exceptions, subtests, strict mode and CLI
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-pytest is the standard Python testing framework. It discovers tests automatically by scanning
-for files matching `test_*.py` or `*_test.py`, classes prefixed with `Test`, and functions
-prefixed with `test_`. It provides rich assertion introspection (no need for `assertEqual`),
-powerful fixtures, markers for metadata, and a plugin ecosystem.
+pytest discovers `test_*.py` / `*_test.py` files, `Test*` classes and `test_*` functions, and
+rewrites plain `assert` statements to show rich failure diffs. Current release is **pytest 9.1.1**
+(2026-06-19); 9.0 dropped Python 3.9 and made `PytestRemovedIn9Warning` an error. Check the runtime:
+Databricks Runtime 17.3 LTS preinstalls **pytest 8.3.5**, which has none of the 8.4/9.x features
+below unless you `%pip install "pytest>=9"`.
 
 ## The Pattern
 
@@ -17,194 +18,133 @@ powerful fixtures, markers for metadata, and a plugin ecosystem.
 import pytest
 
 
-# Simple test function -- pytest discovers this automatically
-def test_addition():
-    assert 1 + 1 == 2
-
-
-# Test with descriptive assertion messages
 def test_parse_invoice_number():
     raw = "  inv-001  "
-    result = raw.strip().upper()
-    assert result == "INV-001", f"Expected 'INV-001', got '{result}'"
+    assert raw.strip().upper() == "INV-001"
 
 
-# Group related tests in a class (no inheritance needed)
-class TestStringProcessor:
+class TestStringProcessor:          # grouping only, no base class
     def test_strip_whitespace(self):
         assert "  hello  ".strip() == "hello"
 
-    def test_uppercase(self):
-        assert "hello".upper() == "HELLO"
 
-    def test_empty_string(self):
-        assert "".strip() == ""
+def test_raises_value_error():
+    with pytest.raises(ValueError, match="invalid literal"):
+        int("not a number")
+
+
+def test_each_row(subtests):        # pytest 9.0+: built-in subtests fixture
+    for i, raw in enumerate(["1", "2", "3"]):
+        with subtests.test(msg="parse", i=i):   # every failing row is reported, not just the first
+            assert int(raw) == i + 1
+
+
+def test_batch_errors():            # pytest 8.4+: match ExceptionGroup contents
+    with pytest.RaisesGroup(ValueError, TypeError):
+        raise ExceptionGroup("batch", [ValueError("a"), TypeError("b")])
 ```
 
 ## Markers
 
 ```python
+import sys
+
 import pytest
 
-# Built-in markers
+
 @pytest.mark.skip(reason="Not implemented yet")
-def test_future_feature():
-    pass
+def test_future_feature(): ...
 
-@pytest.mark.skipif(
-    condition=True, reason="Only on Linux"
-)
-def test_linux_only():
-    pass
 
-@pytest.mark.xfail(reason="Known bug #123")
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+def test_posix_only(): ...
+
+
+@pytest.mark.xfail(reason="Known bug #123", strict=True)   # XPASS fails the run
 def test_known_failure():
     assert 1 == 2
 
-# Custom markers (register in pyproject.toml)
-@pytest.mark.slow
-def test_large_dataset_processing():
-    pass
 
-@pytest.mark.integration
-def test_api_endpoint():
-    pass
+@pytest.mark.slow                    # custom: register it, or strict mode rejects it
+def test_large_dataset_processing(): ...
 ```
 
-## Test Discovery Rules
+## Configuration (pytest 9 native TOML)
 
-| Convention | Example | Discovered? |
-|------------|---------|-------------|
-| File: `test_*.py` | `test_utils.py` | Yes |
-| File: `*_test.py` | `utils_test.py` | Yes |
-| Function: `test_*` | `def test_parse():` | Yes |
-| Class: `Test*` | `class TestParser:` | Yes |
-| Method: `test_*` | `def test_valid(self):` | Yes |
-| File: `utils.py` | `utils.py` | No |
-| Function: `helper_*` | `def helper_parse():` | No |
-
-## Expected Exceptions
-
-```python
-import pytest
-
-def test_raises_value_error():
-    with pytest.raises(ValueError, match="must be positive"):
-        parse_amount(-5)
-
-def test_raises_type_error():
-    with pytest.raises(TypeError):
-        parse_amount("not a number")
+```toml
+[tool.pytest]                     # pytest 9+; cannot coexist with [tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["-ra"]
+strict = true                     # strict_config + strict_markers + strict_parametrization_ids + strict_xfail
+markers = ["slow: long-running tests", "integration: needs external services"]
 ```
+
+`strict = true` also turns on strictness options added in future versions, so use it with a
+pinned pytest. On pytest 8.x keep `[tool.pytest.ini_options]` with `addopts = "--strict-markers"`.
+
+## New Since pytest 8.4
+
+| Feature | Version | Notes |
+|---------|---------|-------|
+| `pytest.RaisesGroup` / `pytest.RaisesExc` | 8.4 | Assert on `ExceptionGroup` members |
+| `pytest.HIDDEN_PARAM` | 8.4 | Hide a parameter from the test ID |
+| Built-in `subtests` fixture | 9.0 | Formerly the pytest-subtests plugin; marked experimental (reporting may change) |
+| Native TOML config (`[tool.pytest]`, `pytest.toml`) | 9.0 | Real TOML types instead of INI strings |
+| `strict` option / `--strict` | 9.0 | Enables all strictness options |
+| `PytestRemovedIn9Warning` is an error | 9.0 | e.g. a sync test that requests an async fixture now errors |
 
 ## Common Mistakes
 
 ### Wrong
 
 ```python
-# Using unittest assertions in pytest
 import unittest
 
-class TestBad(unittest.TestCase):
+class TestBad(unittest.TestCase):          # works, but loses fixtures and assert rewriting
     def test_value(self):
-        self.assertEqual(1 + 1, 2)  # Works but loses pytest features
+        self.assertEqual(1 + 1, 2)
+
+def test_rows():
+    for raw in ["1", "x", "3"]:
+        assert raw.isdigit()               # stops at the first failure; "3" never checked
 ```
 
 ### Correct
 
 ```python
-# Plain assert with pytest -- better output on failure
 def test_value():
     assert 1 + 1 == 2
+
+@pytest.mark.parametrize("raw", ["1", "x", "3"])   # or the subtests fixture
+def test_rows(raw):
+    assert raw.isdigit()
 ```
-
-## Async Testing (pytest-asyncio)
-
-```python
-import pytest
-import httpx
-
-
-# Mark individual test as async
-@pytest.mark.asyncio
-async def test_fetch_data():
-    async with httpx.AsyncClient() as client:
-        response = await client.get("https://api.example.com/data")
-    assert response.status_code == 200
-
-
-# Async fixture with teardown
-@pytest.fixture
-async def async_db():
-    conn = await create_connection("test://localhost/db")
-    yield conn
-    await conn.close()
-
-
-@pytest.mark.asyncio
-async def test_query(async_db):
-    result = await async_db.fetch("SELECT 1")
-    assert result == [(1,)]
-```
-
-### pyproject.toml for auto mode
-
-```toml
-[tool.pytest.ini_options]
-asyncio_mode = "auto"  # all async tests auto-detected, no marker needed
-```
-
-## Property-Based Testing (Hypothesis)
-
-```python
-from hypothesis import given, strategies as st, assume
-
-
-@given(st.lists(st.integers()))
-def test_sort_is_idempotent(xs):
-    """Sorting twice gives the same result as sorting once."""
-    assert sorted(sorted(xs)) == sorted(xs)
-
-
-@given(st.text(min_size=1), st.text(min_size=1))
-def test_concat_length(a, b):
-    """Concatenation length equals sum of parts."""
-    assert len(a + b) == len(a) + len(b)
-
-
-@given(st.integers(min_value=1, max_value=1000))
-def test_positive_division(n):
-    """Division by self always yields 1."""
-    assume(n != 0)
-    assert n / n == 1.0
-```
-
-## pytest 8+ New Features
-
-| Feature | Description |
-|---------|-------------|
-| `pytest.HIDDEN_PARAM` (8.4+) | Hide parameter from test name in parametrize |
-| Improved `--tb` output | Better traceback formatting and diffs |
-| `--override-ini` | Override pyproject.toml settings from CLI |
-| Native `pathlib` support | Fixtures return `Path` objects by default |
 
 ## CLI Quick Reference
 
 | Flag | Purpose |
 |------|---------|
-| `-v` | Verbose: show each test name |
-| `-x` | Exit on first failure |
-| `-s` | Show print/stdout output |
-| `--lf` | Re-run only last-failed tests |
-| `--ff` | Run failures first, then the rest |
-| `-k "expr"` | Filter tests by name expression |
-| `-m "marker"` | Run only tests with marker |
-| `--co` | Collect and list tests, do not run |
-| `--sw` | Stepwise: stop on failure, resume next run |
-| `-n auto` | Parallel execution (pytest-xdist) |
+| `-x` / `--sw` | Stop at first failure / stepwise (resume next run) |
+| `--lf` / `--ff` | Only last-failed / failures first |
+| `-k "expr"` / `-m "marker"` | Filter by name / marker expression |
+| `-ra` | Summary of skips, xfails and errors |
+| `--co -q` | List test IDs without running |
+| `-o key=value` | Override a config option for this run |
+| `-p no:cacheprovider` | Disable `.pytest_cache` (read-only filesystems, e.g. Databricks workspace) |
+| `-n auto` | Parallel run (pytest-xdist plugin) |
 
 ## Related
 
 - [Fixtures](../concepts/fixtures.md)
-- [Parametrize](../concepts/parametrize.md)
-- [Unit Test Patterns](../patterns/unit-test-patterns.md)
+- [Async Testing](../concepts/async-testing.md)
+- [Property-Based Testing](../concepts/property-based-testing.md)
+
+## Sources
+
+- https://docs.pytest.org/en/stable/changelog.html
+- https://docs.pytest.org/en/stable/reference/reference.html
+- https://docs.pytest.org/en/stable/how-to/plugins.html
+- https://docs.pytest.org/en/stable/deprecations.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/17.3lts
+- https://docs.databricks.com/aws/en/notebooks/testing

@@ -1,92 +1,98 @@
 # Spark Quick Reference
 
-> Fast lookup tables for Apache Spark 4.0+. For code examples, see linked files.
+> **Purpose**: Fast lookup for Apache Spark 4.0–4.2 and Databricks Runtime 17.3 LTS (Spark 4.0.0) / 18 LTS (4.1.0) / 19 (4.2.0). Per-feature versions: `reference/version-matrix.md`.
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## DataFrame API Cheat Sheet
 
 | Operation | PySpark | Spark SQL |
 |-----------|---------|-----------|
 | Select | `df.select("col_a", "col_b")` | `SELECT col_a, col_b` |
-| Filter | `df.filter(col("age") > 21)` | `WHERE age > 21` |
-| Group | `df.groupBy("dept").agg(sum("sal"))` | `GROUP BY dept` |
-| Join | `df1.join(df2, "key", "inner")` | `JOIN df2 ON df1.key = df2.key` |
+| Filter | `df.filter(F.col("age") > 21)` | `WHERE age > 21` |
+| Group | `df.groupBy("dept").agg(F.sum("sal"))` | `GROUP BY dept` |
+| Join | `df1.join(df2, "key", "inner")` | `JOIN t2 USING (key)` |
 | Window | `Window.partitionBy("dept").orderBy("sal")` | `OVER (PARTITION BY dept ORDER BY sal)` |
-| Sort | `df.orderBy(col("sal").desc())` | `ORDER BY sal DESC` |
-| Distinct | `df.dropDuplicates(["key"])` | `QUALIFY ROW_NUMBER() = 1` |
+| Safe cast | `F.col("c").try_cast("int")` (4.0+) | `try_cast(c AS INT)` |
+| Top-1 per key | `row_number()` + `filter(rn == 1)` | `QUALIFY` (Databricks DBR 10.4+; OSS Spark 4.2+) |
 
-## Spark SQL vs DataFrame API
+## What Changed in Spark 4.x (and Where It Runs)
 
-| Choose DataFrame API When | Choose Spark SQL When |
-|---------------------------|----------------------|
-| Complex chained transformations | Ad-hoc analysis, familiar SQL users |
-| Need type safety at compile time | Migrating existing SQL queries |
-| UDF composition | Window functions (often cleaner in SQL) |
-| Programmatic column generation | CTEs for readability |
+| Feature | OSS min | DBR 17.3 LTS | Notes |
+|---------|---------|--------------|-------|
+| ANSI mode on by default | 4.0 | Yes (DBR 17.0+) | Bad casts/overflow/÷0 fail → `try_*`; see `concepts/ansi-mode.md` |
+| VARIANT + `variant_get` | 4.0 (GA 4.1) | Yes (DBR 15.4+) | `:` path syntax is SQL: Databricks 15.4+, OSS 4.1+ |
+| Pipe syntax `\|>` | 4.0 | Yes (DBR 16.2+) | `\|` alias + aggregates in `\|> SELECT`: 4.2 / DBR 18.0+ |
+| SQL scripting | 4.0 flag, GA 4.1 | Yes (DBR 16.3+) | |
+| Recursive CTE | 4.1 | Yes (DBR 17.0+) | Default max recursion 100; 1M-row limit |
+| `listagg` / `string_agg` | 4.0 | Yes | |
+| `udf(useArrow=True)` | 3.5 | Yes | Still row-at-a-time Python; Arrow default in 4.2 |
+| `@arrow_udf` (`pyarrow.Array`) | 4.1 | **No** | DBR 18 LTS+ |
+| `transformWithStateInPandas` | 4.0 | Yes (DBR 16.2+) | Row-based Python `transformWithState`: OSS 4.1, Databricks DBR 16.2+ |
+| Real-time mode trigger | 4.1 (Scala) / 4.2 (PySpark) | Yes (DBR 16.4 LTS+) | Photon off, update mode only |
+| Plotting `df.plot` | 4.0 | Yes | Experimental; collects top 1000 rows / a sample to the driver |
+| `pyspark-client`, `spark.api.mode` | 4.0 | n/a | Mode is chosen at session creation |
 
-## Partitioning Quick Reference
+## Partitioning and Layout
 
-| Method | Use When | Effect |
+| Method | Use when | Effect |
 |--------|----------|--------|
-| `repartition(n)` | Need exact N partitions, shuffle OK | Full shuffle, hash-based |
-| `repartition("col")` | Downstream joins/groups on col | Hash partition by column |
-| `coalesce(n)` | Reduce partitions (no shuffle) | Merge adjacent partitions |
-| `.partitionBy("col")` on write | Query patterns filter by col | Physical file partitioning |
-
-## Spark 4.0 New Features
-
-| Feature | What It Does | Example |
-|---------|-------------|---------|
-| VARIANT type | Schema-free JSON column type | `VariantType()`, JSONPath queries |
-| SQL PIPE syntax | Chain SQL transforms readably | `FROM t \|> WHERE x > 1 \|> SELECT y` |
-| SQL UDFs | Reusable SQL-defined functions | `CREATE FUNCTION my_fn(x INT) RETURNS INT` |
-| SQL Scripting | Control flow in SQL | `DECLARE`, `IF/ELSE`, `WHILE`, `FOR` |
-| Session Variables | Mutable variables in SQL session | `DECLARE VARIABLE x = 42` |
-| Python Data Source API | Custom connectors in pure Python | `class MySource(DataSource)` |
-| Polymorphic UDTFs | Dynamic schema from `analyze()` | Output schema adapts to input data |
-| Native Plotting | `df.plot.bar()` without toPandas | Built-in Plotly, no conversion needed |
-| Arrow UDFs | Replaces Pandas UDFs with Arrow | `F.udf(fn, returnType, useArrow=True)` |
-| Spark Connect | Thin client-server architecture | `pyspark-client` package (1.5 MB) |
-| TransformWithState | Next-gen stateful streaming operator | Replaces mapGroupsWithState / flatMapGroupsWithState |
+| `repartition(n, "col")` | Need hash distribution by key | Full shuffle |
+| `coalesce(n)` | Reduce partitions only | No shuffle |
+| `/*+ REBALANCE(col) */` | Even output files before a write | AQE-sized (needs AQE) |
+| `CLUSTER BY` / `.clusterBy()` | Delta tables (Databricks: all new tables) | Replaces partitioning + ZORDER |
+| `CLUSTER BY AUTO` | UC managed + predictive optimization (DBR 15.4+) | Keys picked from query history |
+| `.partitionBy("col")` | Plain Parquet/CSV outputs | Hive-style folders |
 
 ## Spark Connect Quick Reference
 
 | Aspect | Detail |
 |--------|--------|
-| Python client | `pip install pyspark-client` (1.5 MB) |
-| Config toggle | `spark.api.mode = connect` or `classic` |
-| Multi-language | Python, Scala, Java, Go, Swift, Rust clients |
-| ML support | ML on Spark Connect now available |
-| Migration | Set `spark.api.mode` to switch; high API parity |
+| Where | Databricks standard access mode (Python DBR 14.3+), serverless, Databricks Connect; dedicated = Classic |
+| Behaviour | Analysis is lazy: bad column names fail at the action or at `df.columns` |
+| Not available | RDD APIs, JVM handles (`_jsc`, `_jdf`); temp views resolved by name at run time |
+| OSS client | `pip install pyspark-client`; `SparkSession.builder.remote("sc://host:15002")` |
 
-## Format Comparison
+## Performance Settings Checklist
 
-| Format | Read Speed | Write Speed | Schema Evolution | Time Travel |
-|--------|-----------|-------------|-----------------|-------------|
-| Parquet | Fast | Fast | Limited | No |
-| Delta Lake | Fast | Medium | Full | Yes |
-| Iceberg | Fast | Medium | Full (partition too) | Yes |
-| ORC | Fast | Fast | Limited | No |
-
-## Performance Tuning Checklist
-
-| Check | Setting | Default |
-|-------|---------|---------|
-| Auto broadcast | `spark.sql.autoBroadcastJoinThreshold` | 10MB |
-| AQE enabled | `spark.sql.adaptive.enabled` | true (3.x) |
-| Shuffle partitions | `spark.sql.shuffle.partitions` | 200 |
-| Skew join | `spark.sql.adaptive.skewJoin.enabled` | true |
-| Dynamic partition pruning | `spark.sql.optimizer.dynamicPartitionPruning.enabled` | true |
+| Setting | OSS default | Databricks |
+|---------|-------------|------------|
+| `spark.sql.adaptive.enabled` | `true` (3.2+) | on (`spark.databricks.optimizer.adaptive.enabled`) |
+| `spark.sql.shuffle.partitions` | `200` | `auto` recommended (default on serverless) |
+| `spark.sql.autoBroadcastJoinThreshold` | `10MB` | static plan; AQE runtime switch up to `30MB` |
+| `spark.sql.adaptive.skewJoin.enabled` | `true` | `true` (skew hints not needed) |
+| `spark.sql.optimizer.dynamicPartitionPruning.enabled` | `true` | `true` |
+| Photon | n/a | On by default (UI); API needs `runtime_engine: PHOTON` |
 
 ## Common Pitfalls
 
 | Don't | Do |
 |-------|-----|
-| `df.collect()` on large data | `df.take(10)` or `df.show()` |
-| UDFs for simple transforms | Built-in functions (`F.when`, `F.coalesce`) |
-| Pandas UDFs (legacy) | Arrow UDFs (`useArrow=True`) for 4.0+ |
-| `coalesce(1)` on large data | Appropriate partition count |
-| `.cache()` without `.unpersist()` | Always unpersist when done |
-| Fixed shuffle partitions | Let AQE auto-tune |
-| `mapGroupsWithState` (deprecated) | `TransformWithState` operator (4.0+) |
-| JSON as STRING + manual parsing | VARIANT type for semi-structured data (4.0+) |
-| Scala connectors for Python devs | Python Data Source API for custom sources (4.0+) |
+| `df.collect()` on large data | `df.take(10)`, `df.show()`, or write to a table |
+| Python UDFs for simple transforms | Built-ins (`F.when`, `F.regexp_replace`) — UDFs also disable Photon |
+| `cast` on dirty strings under ANSI | `try_cast` / `try_to_number`, then count the NULLs |
+| `union`/`coalesce` of BIGINT and STRING columns | Cast every branch to the intended type first |
+| Hard-coded `shuffle.partitions` | `auto` on Databricks; AQE coalescing on OSS |
+| `.cache()` on serverless | Not supported there — materialize to a table or single-pass |
+| `spark.sparkContext._jsc...` | `DESCRIBE DETAIL`, `df.explain()` — works on Spark Connect |
+| `F.col("payload:a.b")` | `F.variant_get("payload", "$.a.b", "string")` |
+| New Delta tables with `partitionBy` + ZORDER | Liquid clustering (`CLUSTER BY` / `AUTO`) |
+| `input_file_name()` | `_metadata.file_path` (DBR 17.3 LTS+ no longer supports it) |
+| `mapGroupsWithState` / `applyInPandasWithState` for new code | `transformWithState(InPandas)` |
+
+## Related Documentation
+
+| Topic | Path |
+|-------|------|
+| ANSI mode | `concepts/ansi-mode.md` |
+| Version matrix | `reference/version-matrix.md` |
+| Full Index | `index.md` |
+
+## Sources
+
+- https://spark.apache.org/releases/spark-release-4-0-0.html · https://spark.apache.org/releases/spark-release-4.1.0.html · https://spark.apache.org/releases/spark-release-4-2-0.html
+- https://docs.databricks.com/aws/en/release-notes/runtime/ · https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-ansi-compliance
+- https://docs.databricks.com/aws/en/optimizations/aqe · https://docs.databricks.com/aws/en/spark/conf · https://docs.databricks.com/aws/en/compute/photon
+- https://docs.databricks.com/aws/en/spark/connect-vs-classic · https://docs.databricks.com/aws/en/compute/serverless/limitations
+- https://docs.databricks.com/aws/en/tables/clustering · https://docs.databricks.com/aws/en/sql/language-manual/functions/input_file_name
+- https://spark.apache.org/docs/latest/configuration.html · https://spark.apache.org/docs/latest/sql-performance-tuning.html

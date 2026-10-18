@@ -1,7 +1,8 @@
 # Macro Patterns
 
-> **Purpose**: Jinja control flow, cross-database macros, grants, and whitespace control
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Jinja control flow, cross-database macros, grants (prefer the `grants:` config), and whitespace control
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -38,17 +39,24 @@
 {% endmacro %}
 ```
 
-```sql
--- macros/grant_select.sql
--- Post-hook macro to grant read access
+```yaml
+# Grants: prefer the native config over a hand-written GRANT post-hook
+models:
+  - name: fct_orders
+    config:
+      grants:
+        select: ['analysts', 'bi_service']   # the most specific level replaces inherited grants
+# dbt_project.yml: `+grants: {select: [...]}`; `'+select'` in a model adds to inherited grants;
+# an empty list revokes. `grants:` targets the model's relation; dbt's Databricks notes say READ_METADATA /
+# USAGE (legacy hive_metastore privileges) need post-hooks, as do schema-level Unity Catalog privileges.
+```
 
-{% macro grant_select(role) %}
-    {%- set sql -%}
-        grant select on {{ this }} to role {{ role }}
-    {%- endset -%}
+```sql
+-- macros/grant_use_schema.sql — schema-level privilege outside `grants:` (Unity Catalog syntax)
+{% macro grant_use_schema(principal) %}
     {% if execute %}
-        {% do run_query(sql) %}
-        {{ log("Granted select on " ~ this ~ " to " ~ role, info=true) }}
+        {% do run_query("GRANT USE SCHEMA ON SCHEMA " ~ this.database ~ "." ~ this.schema
+                        ~ " TO `" ~ principal ~ "`") %}
     {% endif %}
 {% endmacro %}
 ```
@@ -78,16 +86,19 @@
 | `dispatch` | `[]` | Package search order for adapter.dispatch() |
 | `post-hook` | `[]` | SQL/macros to run after model builds |
 | `pre-hook` | `[]` | SQL/macros to run before model builds |
+| `grants` | `{}` | Privilege → list of principals; dbt applies and revokes to match |
 
 ## Example Usage
 
 ```yaml
-# dbt_project.yml — apply grant macro as post-hook
+# dbt_project.yml — folder-level grants plus a post-hook for a privilege outside `grants:`
 models:
   analytics:
     marts:
+      +grants:
+        select: ['analysts']
       +post-hook:
-        - "{{ grant_select('analyst_role') }}"
+        - "{{ grant_use_schema('analysts') }}"
 ```
 
 ```sql
@@ -102,3 +113,11 @@ from {{ ref('stg_payments') }}
 
 - [generic-tests](../patterns/generic-tests.md)
 - [model-types](../concepts/model-types.md)
+
+## Sources
+
+- https://docs.getdbt.com/reference/resource-configs/grants
+- https://docs.getdbt.com/docs/build/jinja-macros
+- https://docs.getdbt.com/reference/dbt-jinja-functions/dispatch
+- https://docs.getdbt.com/docs/build/custom-schemas
+- https://docs.databricks.com/aws/en/sql/language-manual/security-grant

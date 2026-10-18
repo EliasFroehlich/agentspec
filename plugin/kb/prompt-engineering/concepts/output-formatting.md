@@ -1,133 +1,136 @@
 # Output Formatting
 
-> **Purpose**: Enforce reliable structured output from LLMs using JSON Schema mode, Instructor, tool use, and validation
-> **Confidence**: 0.95
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Get schema-valid structured output from LLMs with provider-native structured outputs (Claude, OpenAI, Gemini), Instructor, and validation
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Getting consistent structured output from LLMs requires API-level constraints plus validation. In 2026, three approaches dominate: OpenAI's native JSON Schema mode (guarantees schema conformance), Anthropic's tool-use-as-schema pattern, and the Instructor library (works with any provider, Pydantic-native). The old approach of "please return JSON" in the prompt is no longer recommended for production.
+All three major APIs now constrain output to a JSON Schema natively: Claude structured outputs (`output_config.format`,
+`client.messages.parse`; GA), OpenAI Structured Outputs (Responses API `text.format` / `client.responses.parse`), and Gemini
+`response_schema`. Use them instead of "return only JSON" prompts, JSON mode, assistant prefill, or forcing a tool call —
+on Claude Opus 5.5, Sonnet 5.5 and Fable 5.1 a forced `tool_choice` returns 400, and prefill returns 400 on every 4.6+
+model. Pydantic stays as the type definition and for business-rule validation after parsing.
 
-## The Pattern: Instructor (Any Provider)
+## The Pattern: Claude
 
 ```python
-import instructor
+import anthropic
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from openai import OpenAI
-
-client = instructor.from_openai(OpenAI())
 
 class TaskResult(BaseModel):
     status: str = Field(description="completed | failed | partial")
-    summary: str = Field(description="Brief result summary")
-    items: List[dict] = Field(default_factory=list)
-    confidence: float = Field(ge=0.0, le=1.0)
-    errors: Optional[List[str]] = None
+    summary: str
+    confidence: float = Field(ge=0.0, le=1.0)   # SDK moves ge/le into the description and re-validates
+    errors: list[str] = Field(default_factory=list)
 
-def get_structured_output(data: str) -> TaskResult:
-    return client.chat.completions.create(
-        model="gpt-4o",
-        response_model=TaskResult,
-        max_retries=2,
-        messages=[{"role": "user", "content": f"Analyze:\n\n{data}"}],
-    )
-# Returns validated TaskResult -- guaranteed schema conformance
+client = anthropic.Anthropic()
+resp = client.messages.parse(
+    model="claude-sonnet-5-5",
+    max_tokens=16000,
+    messages=[{"role": "user", "content": f"Analyze:\n\n{data}"}],
+    output_format=TaskResult,
+)
+if resp.stop_reason in ("refusal", "max_tokens"):     # no valid object in these cases
+    raise RuntimeError(resp.stop_reason)
+result: TaskResult = resp.parsed_output
 ```
 
-## The Pattern: OpenAI JSON Schema Mode
+Raw JSON Schema instead of Pydantic: `client.messages.create(..., output_config={"format": {"type": "json_schema",
+"schema": SCHEMA}})`, then `json.loads` the first `text` block. Objects need `"additionalProperties": false`.
+
+## The Pattern: OpenAI (Responses API)
 
 ```python
 from openai import OpenAI
 
 client = OpenAI()
-
-response = client.chat.completions.create(
-    model="gpt-4o",
-    messages=[{"role": "user", "content": f"Analyze:\n\n{data}"}],
-    response_format={
-        "type": "json_schema",
-        "json_schema": {
-            "name": "task_result",
-            "schema": TaskResult.model_json_schema(),
-            "strict": True,  # guaranteed conformance
-        }
-    }
+resp = client.responses.parse(
+    model="gpt-6-astra",
+    input=[{"role": "system", "content": "Analyze the data."},
+           {"role": "user", "content": data}],
+    text_format=TaskResult,
 )
-result = TaskResult.model_validate_json(response.choices[0].message.content)
+result = resp.output_parsed
 ```
 
-## The Pattern: Anthropic Tool-Use-as-Schema
+Raw schema: `client.responses.create(..., text={"format": {"type": "json_schema", "name": "task_result",
+"schema": SCHEMA, "strict": True}})`. OpenAI recommends Structured Outputs over JSON mode whenever possible.
+
+## The Pattern: Gemini (`google-genai`)
 
 ```python
-import anthropic
+from google import genai
+from google.genai import types
 
-client = anthropic.Anthropic()
-
-response = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=1024,
-    tools=[{
-        "name": "return_result",
-        "description": "Return the structured analysis result",
-        "input_schema": TaskResult.model_json_schema(),
-    }],
-    tool_choice={"type": "tool", "name": "return_result"},
-    messages=[{"role": "user", "content": f"Analyze:\n\n{data}"}],
+client = genai.Client()
+resp = client.models.generate_content(
+    model="gemini-3.8-flash",
+    contents=f"Analyze:\n\n{data}",
+    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=TaskResult),
 )
-tool_use = next(b for b in response.content if b.type == "tool_use")
-result = TaskResult.model_validate(tool_use.input)
+result = resp.parsed
 ```
 
-## Structured Output Methods (2026)
-
-| Method | Provider | Reliability | Complexity | Use When |
-|--------|----------|-------------|------------|----------|
-| Instructor library | Any | Highest | Low | Default choice for Python projects |
-| JSON Schema mode (strict) | OpenAI | Highest | Medium | OpenAI-only, guaranteed schema |
-| Tool-use-as-schema | Anthropic | Highest | Medium | Claude projects, structured output |
-| Extended thinking + output | Claude 4.x | High | Low | Complex reasoning + structured result |
-| JSON mode | OpenAI | High | Low | Simple JSON, no schema guarantee |
-| Prompt-only | Any | Medium | Low | Quick prototypes only |
-
-## Validation Pipeline
+## The Pattern: Instructor (one interface, many providers)
 
 ```python
-from pydantic import BaseModel, ValidationError
+import instructor
 
-def parse_with_retry(raw_json: str, model_class: type, max_retries: int = 2) -> BaseModel:
-    """Parse JSON with retry on validation failure."""
-    for attempt in range(max_retries + 1):
-        try:
-            return model_class.model_validate_json(raw_json)
-        except ValidationError as e:
-            if attempt == max_retries:
-                raise
-            raw_json = repair_json(raw_json, str(e))
-    raise ValueError("Exceeded max retries")
+client = instructor.from_provider("anthropic/claude-sonnet-5", mode=instructor.Mode.TOOLS)
+result = client.create(
+    max_tokens=1024, response_model=TaskResult,
+    messages=[{"role": "user", "content": f"Analyze:\n\n{data}"}],
+)
 ```
+
+`Mode.TOOLS` relies on tool calling. Before using it with models that reject forced `tool_choice` (Opus 5.5, Sonnet 5.5,
+Fable 5.1), confirm the Instructor version supports them, or use the native `messages.parse` path.
+
+## Structured Output Methods
+
+| Method | Provider | Schema enforced by | Use when |
+|--------|----------|--------------------|----------|
+| `messages.parse` / `output_config.format` | Anthropic | API (GA) | Default for Claude |
+| `strict: true` on tool definitions | Anthropic, OpenAI | API | Arguments of tools the model chooses to call |
+| `responses.parse` / `text.format` | OpenAI | API | Default for OpenAI |
+| `response_schema` | Google Gemini | API | Default for Gemini |
+| Instructor (`from_provider`) | Many | Library (tools/JSON) + Pydantic retries | One code path across providers |
+| `ai_extract` / `ai_query(..., responseFormat => ...)` | Databricks SQL | Platform | Batch extraction inside Spark/SQL |
+| JSON mode / prompt-only | Any | Nothing | Prototypes only |
+
+Notes: Claude citations cannot be combined with `output_config.format` (400). JSON Schema support is a subset on each
+provider — every object needs explicit `properties` (`additionalProperties: false`), so model key/value data as a list
+of `{name, value}` objects instead of `dict`/map fields, and check each provider's limitations page.
 
 ## Common Mistakes
 
 ### Wrong
+
 ```python
-# No format enforcement -- output may include markdown, text, etc.
-prompt = "Return the data as JSON"
+# Prompt-only JSON + manual repair loop
+text = llm("Return the data as JSON only, no markdown")
+data = json.loads(text.strip("```json").strip("```"))
 ```
 
 ### Correct
+
 ```python
-# Use Instructor for guaranteed structured output
-result = client.chat.completions.create(
-    model="gpt-4o",
-    response_model=MySchema,  # Pydantic model = schema + validation
-    max_retries=2,
-    messages=[{"role": "user", "content": prompt}],
-)
+resp = client.messages.parse(model="claude-sonnet-5-5", max_tokens=16000,
+                             messages=[{"role": "user", "content": prompt}], output_format=MySchema)
+data = resp.parsed_output
 ```
 
 ## Related
 
 - [Structured Extraction](../concepts/structured-extraction.md)
 - [Document Extraction Pattern](../patterns/document-extraction.md)
-- [Prompt Template Pattern](../patterns/prompt-template.md)
+- [Claude API Surface](../../genai/concepts/anthropic-api-surface.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.openai.com/docs/guides/structured-outputs
+- https://github.com/googleapis/python-genai
+- https://python.useinstructor.com/integrations/anthropic/
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_extract

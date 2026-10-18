@@ -1,8 +1,8 @@
 # Cross-Platform SQL Patterns
 
-> **Purpose:** SQL dialect differences across Snowflake, Databricks, and BigQuery for migration and multi-cloud
-> **Confidence:** 0.90
-> **MCP Validated:** 2026-03-26
+> **Purpose**: SQL dialect differences across Snowflake, Databricks, and BigQuery for migration and multi-cloud
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
@@ -32,10 +32,10 @@ SELECT
   raw_data:items[0].price::FLOAT AS first_item_price
 FROM events;
 
--- Databricks: STRING column with colon operator (Spark 3.x+)
+-- Databricks: colon path works on JSON STRING and on VARIANT (VARIANT: DBR 15.4 LTS+)
 SELECT
   raw_data:customer.name::STRING AS customer_name,
-  from_json(raw_data, schema).items[0].price AS first_item_price
+  raw_data:items[0].price::DOUBLE AS first_item_price
 FROM events;
 
 -- BigQuery: JSON type with JSON_VALUE / JSON_QUERY
@@ -72,10 +72,20 @@ MERGE INTO target t USING source s ON t.id = s.id
 WHEN MATCHED THEN UPDATE SET *
 WHEN NOT MATCHED THEN INSERT *;
 
--- BigQuery
+-- BigQuery: no UPDATE wildcard; ROW exists only in the INSERT branch
 MERGE INTO `project.dataset.target` t USING `project.dataset.source` s ON t.id = s.id
-WHEN MATCHED THEN UPDATE SET t.value = s.value, t.updated_at = CURRENT_TIMESTAMP()
+WHEN MATCHED THEN UPDATE SET value = s.value, updated_at = CURRENT_TIMESTAMP()
 WHEN NOT MATCHED THEN INSERT ROW;
+```
+
+### QUALIFY (filter on window functions)
+
+```sql
+-- Same syntax on all three: Snowflake, Databricks (DBR 10.4 LTS+ / Databricks SQL), BigQuery
+SELECT *
+FROM orders
+QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_ts DESC) = 1;
+-- Apache Spark OSS has QUALIFY only from 4.2.0 (SPARK-31561).
 ```
 
 ## Quick Reference
@@ -87,8 +97,9 @@ WHEN NOT MATCHED THEN INSERT ROW;
 | Flatten array | `LATERAL FLATTEN()` | `EXPLODE()` | `UNNEST()` |
 | Create array | `ARRAY_CONSTRUCT()` | `ARRAY()` | `[ ]` literal |
 | Regex extract | `REGEXP_SUBSTR()` | `REGEXP_EXTRACT()` | `REGEXP_EXTRACT()` |
-| String agg | `LISTAGG()` | `COLLECT_LIST()` | `STRING_AGG()` |
-| Upsert wildcard | Not supported | `UPDATE SET *` | `UPDATE SET ROW` |
+| String agg | `LISTAGG()` | `LISTAGG()` / `STRING_AGG()` (DBR 16.4+); `concat_ws(',', collect_list(x))` before | `STRING_AGG()` |
+| Upsert wildcard | Not supported | `UPDATE SET *` / `INSERT *` | Not supported (`INSERT ROW` only) |
+| QUALIFY | Supported | DBR 10.4 LTS+ | Supported |
 | Temp table | `CREATE TEMP TABLE` | `CREATE TEMP VIEW` | `CREATE TEMP TABLE` |
 | Type: string | `VARCHAR` / `STRING` | `STRING` | `STRING` |
 | Type: integer | `NUMBER(38,0)` | `BIGINT` / `INT` | `INT64` |
@@ -111,14 +122,25 @@ SELECT DATE_TRUNC(order_date, MONTH) FROM orders;
 
 ### Migration Considerations
 
-- **Snowflake to Databricks:** VARIANT to STRING + schema-on-read; FLATTEN to EXPLODE; QUALIFY to subquery
+- **Snowflake to Databricks:** VARIANT maps to Databricks VARIANT (DBR 15.4 LTS+); FLATTEN to EXPLODE / `LATERAL VIEW`; QUALIFY ports unchanged
 - **Snowflake to BigQuery:** Reverse DATE_TRUNC args; FLATTEN to UNNEST; VARIANT to JSON type
 - **BigQuery to Snowflake:** UNNEST to FLATTEN; STRUCT to OBJECT; backtick paths to dot notation
-- **QUALIFY clause:** Supported in Snowflake and Databricks 14.x+; not supported in BigQuery (use subquery)
+- **QUALIFY clause:** Supported in Snowflake, Databricks (DBR 10.4 LTS+) and BigQuery; only open-source Spark before 4.2 lacks it
 
 ## Related
 
 - [Snowflake Cortex](snowflake-cortex.md) -- Snowflake-specific AI and platform features
-- [Databricks LakeFlow](databricks-lakeflow.md) -- Databricks-specific platform features
+- [Databricks Lakeflow](databricks-lakeflow.md) -- Databricks-specific platform features
 - [BigQuery AI](bigquery-ai.md) -- BigQuery-specific ML and AI capabilities
 - [SQL Patterns KB](../../sql-patterns/index.md) -- General cross-dialect SQL patterns
+
+## Sources
+
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax
+- https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-qualify
+- https://docs.databricks.com/aws/en/sql/language-manual/delta-merge-into
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/listagg
+- https://docs.databricks.com/aws/en/semi-structured/variant
+- https://spark.apache.org/releases/spark-release-4-2-0.html
+- https://docs.snowflake.com/en/sql-reference/constructs/qualify

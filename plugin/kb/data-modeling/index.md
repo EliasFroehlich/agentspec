@@ -1,7 +1,8 @@
 # Data Modeling Knowledge Base
 
-> **Purpose**: Schema design — dimensional modeling, Data Vault 2.0, SCD types, OBT debate, schema evolution (Iceberg/Delta/Avro)
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Schema design — dimensional modeling, Data Vault 2.0, SCD types (incl. `AUTO CDC`), OBT, schema evolution (Iceberg v3 / Delta 4.4 / Avro), Databricks constraints and identity-column caveats
+> **Confidence**: 0.90
+> **MCP Validated**: 2026-10-17
 
 ## Quick Navigation
 
@@ -37,10 +38,11 @@
 |---------|-------------|
 | **Dimensional Modeling** | Kimball star schema — facts (events) + dimensions (attributes) |
 | **SCD Types** | Track historical changes: Type 1 (overwrite) through Type 6 (hybrid) |
-| **Schema Evolution** | Add/rename/drop columns without breaking consumers (Iceberg v3, Delta 4.x, Avro) |
+| **Schema Evolution** | Add/rename/drop columns without breaking consumers (Iceberg v3, Delta 4.x, Avro); explicit DDL, never `overwriteSchema` on shared tables |
 | **Data Vault 2.0** | Hub-link-satellite model for enterprise-scale warehousing; automation via AutomateDV/dbt |
 | **One Big Table (OBT)** | Denormalized wide table for BI dashboards; trade-offs vs star schema |
-| **Modeling in 2025+** | Star schema + semantic layer, OBT for dashboards, Data Vault for enterprise integration |
+| **Modeling today** | Star schema + semantic layer (Unity Catalog [metric views](../metric-views/index.md), dbt Semantic Layer, Cube), OBT/materialized views for dashboards, Data Vault for enterprise integration |
+| **Constraints on Databricks** | NOT NULL/CHECK enforced; PK/FK informational (`RELY` for optimizer rewrites); identity columns disable concurrent transactions |
 
 ---
 
@@ -59,4 +61,12 @@
 | Agent | Primary Files | Use Case |
 |-------|---------------|----------|
 | schema-designer | All files | Schema creation, modeling decisions |
+| medallion-architect | patterns/star-schema.md, concepts/scd-types.md | Gold-layer modeling |
 | define-agent | concepts/dimensional-modeling.md | Requirements extraction |
+
+## Sources
+
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/tables/features/generated-columns
+- https://docs.databricks.com/aws/en/ldp/cdc
+- https://docs.databricks.com/aws/en/uc-semantics/metric-views

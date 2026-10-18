@@ -2,11 +2,11 @@
 
 > **Purpose**: CREATE TABLE, MERGE INTO, time travel, partition evolution, compaction, snapshot management
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Core Iceberg table operations for production use: table creation with hidden partitioning, upsert via MERGE, time travel queries, and maintenance procedures (compaction, snapshot expiration, orphan removal).
+Core Iceberg table operations for production use with Spark and the Iceberg runtime (library 1.12.0): table creation with hidden partitioning, upsert via MERGE, time travel queries, and maintenance procedures (compaction, snapshot expiration, orphan removal). `ALTER TABLE ... PARTITION FIELD` and `CALL ... system.*` need the Iceberg Spark SQL extensions. On Databricks managed Iceberg tables the rules differ — see the last section.
 
 ## The Pattern
 
@@ -25,7 +25,7 @@ CREATE TABLE catalog.bronze.raw_events (
     _ingested_at    TIMESTAMP NOT NULL
 )
 USING iceberg
-PARTITIONED BY (days(event_timestamp), bucket(8, user_id))
+PARTITIONED BY (day(event_timestamp), bucket(8, user_id))   -- days() is the older, still accepted form
 TBLPROPERTIES (
     'format-version' = '3',
     'write.parquet.compression-codec' = 'zstd',
@@ -60,9 +60,8 @@ GROUP BY 1, 2;
 SELECT * FROM catalog.bronze.raw_events VERSION AS OF 12345;           -- by snapshot ID
 SELECT * FROM catalog.bronze.raw_events TIMESTAMP AS OF '2026-03-25'; -- by timestamp
 
--- 5. Partition evolution
-ALTER TABLE catalog.bronze.raw_events DROP PARTITION FIELD days(event_timestamp);
-ALTER TABLE catalog.bronze.raw_events ADD PARTITION FIELD hours(event_timestamp);
+-- 5. Partition evolution (metadata-only; daily -> hourly does not require dropping day())
+ALTER TABLE catalog.bronze.raw_events ADD PARTITION FIELD hour(event_timestamp);
 
 -- 6. Maintenance: compaction (rewrite small files)
 CALL catalog.system.rewrite_data_files(
@@ -94,8 +93,30 @@ CALL catalog.system.remove_orphan_files(
 | Orphan removal | `remove_orphan_files` | Weekly |
 | Metadata rewrite | `rewrite_manifests` | Monthly or after large schema changes |
 
+Frequencies above are starting points, not documented defaults — tune to file counts and commit rate.
+
+## Iceberg on Databricks (Unity Catalog managed Iceberg)
+
+| Topic | Databricks behavior |
+|---|---|
+| Layout | Liquid clustering (`CLUSTER BY`); `PARTITIONED BY` columns are treated as clustering keys; expression transforms (`day()`, `bucket()`, ...) are not supported |
+| Partition evolution | Only from external engines through the Iceberg REST Catalog, not from Databricks SQL |
+| Maintenance | Predictive optimization (required for managed Iceberg) handles compaction and snapshot expiration — do not schedule `CALL system.*` |
+| Row-level deletes | v2 position/equality deletes unsupported; v3 deletion vectors (DBR 18 LTS+) |
+| Unsupported | Branching/tagging, UUID, `Fixed(L)`, TIME, compression codec changes (Zstd only) |
+
 ## Related
 
 - [iceberg-v3 concept](../concepts/iceberg-v3.md)
+- [unity-catalog-iceberg concept](../concepts/unity-catalog-iceberg.md)
 - [delta-operations](delta-operations.md)
 - [migration-to-open-formats](migration-to-open-formats.md)
+
+## Sources
+
+- https://iceberg.apache.org/docs/latest/spark-ddl/
+- https://iceberg.apache.org/docs/latest/spark-procedures/
+- https://iceberg.apache.org/docs/latest/spark-queries/
+- https://iceberg.apache.org/releases/
+- https://docs.databricks.com/aws/en/iceberg/
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using

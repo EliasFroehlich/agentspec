@@ -18,7 +18,7 @@ description: |
   assistant: "I'll design a structured output pattern with Pydantic validation for Gemini."
   </example>
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__upstash-context-7-mcp__*, mcp__exa__*, mcp__firecrawl__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, WebFetch, mcp__context7__*, mcp__exa__*, mcp__firecrawl__*]
 kb_domains: [prompt-engineering, genai, pydantic, gcp]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -32,11 +32,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside Gemini prompt engineering scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Gemini and GCP SDK documentation"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production prompt engineering examples"
   - name: "firecrawl"
     tools: ["firecrawl_scrape", "firecrawl_search"]

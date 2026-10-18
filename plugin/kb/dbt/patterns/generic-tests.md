@@ -1,7 +1,8 @@
 # Generic Tests
 
-> **Purpose**: Custom reusable test macros with parameters, severity, and tagging
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Custom reusable test macros with parameters, severity and tagging — applied with `data_tests:` + `arguments:` + `config:`
+> **Confidence**: 0.95
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -49,23 +50,26 @@
 ```
 
 ```yaml
-# Apply custom tests in schema.yml
+# Apply custom tests in a properties file (dbt 1.10.5+ / v2 shape)
 models:
   - name: fct_orders
-    tests:
+    data_tests:
       - row_count_ratio:
-          input_model: stg_stripe__orders
-          min_ratio: 0.95
-          max_ratio: 1.05
-          severity: warn
+          arguments:                  # inputs to the test macro
+            input_model: stg_stripe__orders
+            min_ratio: 0.95
+            max_ratio: 1.05
+          config:                     # framework options
+            severity: warn
     columns:
       - name: order_total
-        tests:
+        data_tests:
           - positive_values:
-              allow_zero: true
-              severity: error
-              tags: ['finance', 'critical']
+              arguments:
+                allow_zero: true
               config:
+                severity: error
+                tags: ['finance', 'critical']
                 store_failures: true
                 schema: test_results
 ```
@@ -75,10 +79,14 @@ models:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `severity` | `error` | `error` fails the pipeline, `warn` logs only |
-| `store_failures` | `false` | Save failing rows to a table for debugging |
-| `schema` | target schema | Schema for stored failure tables |
+| `store_failures` | `false` | Save failing rows to a table (default schema `{{ profile.schema }}_dbt_test__audit`) |
+| `schema` | `dbt_test__audit` suffix | Schema for stored failure tables |
 | `tags` | `[]` | Tags for selective test execution (`dbt test --select tag:finance`) |
 | `enabled` | `true` | Disable test without removing it |
+| `store_failures_as` | `ephemeral` | `table` or `view` to persist failures; overrides `store_failures` |
+
+All of the above go under `config:`; macro parameters (`allow_zero`, `min_ratio`) go under `arguments:`. Top-level
+inputs are deprecated since 1.10.5 (`MissingArgumentsPropertyInGenericTestDeprecation`) and rejected by dbt v2.
 
 ## Example Usage
 
@@ -97,3 +105,11 @@ dbt test --store-failures
 
 - [testing-framework](../concepts/testing-framework.md)
 - [macro-patterns](../patterns/macro-patterns.md)
+
+## Sources
+
+- https://docs.getdbt.com/docs/build/data-tests
+- https://docs.getdbt.com/reference/data-test-configs
+- https://docs.getdbt.com/reference/resource-configs/store_failures
+- https://docs.getdbt.com/reference/resource-configs/store_failures_as
+- https://docs.getdbt.com/reference/deprecations

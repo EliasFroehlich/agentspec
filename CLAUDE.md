@@ -6,7 +6,7 @@
 
 ## Project Context
 
-**What is AgentSpec?** A Claude Code plugin that provides structured AI-assisted development through a 5-phase SDD workflow, specialized for data engineering with 58 agents, 31 commands, 24 KB domains, and 21 skills (16 distributed in the plugin + 5 repo-local).
+**What is AgentSpec?** A Claude Code plugin that provides structured AI-assisted development through a 5-phase SDD workflow, specialized for data engineering with 58 agents, 31 commands, 25 KB domains, and 21 skills (16 distributed in the plugin + 5 repo-local).
 
 **Component model (canonical: `.claude/kb/shared/component-model.md`):**
 
@@ -19,7 +19,7 @@
 
 New logic goes to the layer that owns it — the `component-model` skill walks the decision; the SDD workflow components are the reference implementation.
 
-**Current Status:** v3.6.0 shipped (trust layer V0 for the built plugin, spec-driven agent creation pipeline + agent-architect, artifact scoring layer, `github-review-pr` repo-local review skill, single-source `plugin.json` version and release-branch flow). Linear is the project tracker (source of truth).
+**Current Status:** v3.7.0 shipped (KB and agents re-verified against official sources on 2026-10-17: 19 data domains rewritten or corrected, new `metric-views` domain, MCP tool names fixed in 21 agents, third-party client context removed). Linear is the project tracker (source of truth).
 
 ---
 
@@ -60,7 +60,7 @@ agentspec/
 │   │   ├── reports/         # Build reports
 │   │   └── archive/         # Shipped features
 │   │
-│   └── kb/                  # Knowledge Base (24 domains)
+│   └── kb/                  # Knowledge Base (25 domains)
 │       ├── _templates/      # 7 KB domain templates
 │       ├── _index.yaml      # Domain registry
 │       ├── shared/          # Cross-domain anti-patterns and conventions
@@ -164,7 +164,7 @@ Data engineering example:
 
 | Task | Status | Description |
 |------|--------|-------------|
-| Data engineering pivot | Done | 24 KB domains, 58 agents (8 categories), 31 commands |
+| Data engineering pivot | Done | 25 KB domains, 58 agents (8 categories), 31 commands |
 | Adapt existing agents for DE | Done | code-reviewer, code-cleaner, test-generator, design, define, build |
 | Adapt SDD templates for DE | Done | BRAINSTORM, DEFINE, DESIGN, BUILD_REPORT templates |
 | Documentation overhaul | Done | Getting started, concepts, tutorials, reference, README |
@@ -264,7 +264,7 @@ Data engineering example:
 | `.claude/sdd/architecture/WORKFLOW_CONTRACTS.yaml` | Phase transition rules |
 | `.claude/sdd/templates/*.md` | Document templates (DE-aware) |
 | `.claude/kb/_templates/*.template` | KB domain templates |
-| `.claude/kb/_index.yaml` | KB domain registry (24 domains) |
+| `.claude/kb/_index.yaml` | KB domain registry (25 domains) |
 | `.claude/agents/README.md` | Agent routing + escalation map |
 | `.claude/agents/architect/` | System-level design agents (schema, pipeline, lakehouse) |
 | `.claude/agents/cloud/` | AWS, GCP, CI/CD, deployment agents |
@@ -286,6 +286,6 @@ Data engineering example:
 
 ## Version
 
-- **Version:** 3.6.0
+- **Version:** 3.7.0
 - **Status:** Release
-- **Last Updated:** 2026-09-17
+- **Last Updated:** 2026-10-17

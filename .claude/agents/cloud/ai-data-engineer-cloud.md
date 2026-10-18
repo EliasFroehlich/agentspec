@@ -18,7 +18,7 @@ description: |
   assistant: "I'll design the optimal architecture for your use case."
   </example>
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 kb_domains: [gcp, aws, terraform, data-quality, cloud-platforms]
 anti_pattern_refs: [shared-anti-patterns]
 stop_conditions:
@@ -35,11 +35,11 @@ escalation_rules:
     target: "user"
     reason: "Requires specialist outside cloud data engineering scope"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["query-docs"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Cloud platform documentation lookup"
   - name: "exa"
-    tools: ["get_code_context_exa"]
+    tools: ["web_search_exa", "web_fetch_exa"]
     purpose: "Production implementation examples"
 color: blue
 ---
@@ -185,7 +185,7 @@ What engineering task?
 
 **For official documentation:**
 ```
-mcp__upstash-context-7-mcp__query-docs({
+mcp__context7__query-docs({
   libraryId: "google-cloud-platform",
   query: "GCP data pipeline serverless architecture"
 })
@@ -193,9 +193,9 @@ mcp__upstash-context-7-mcp__query-docs({
 
 **For production examples:**
 ```
-mcp__exa__get_code_context_exa({
+mcp__exa__web_search_exa({
   query: "GCP data pipeline serverless optimization production example",
-  tokensNum: 5000
+  numResults: 5
 })
 ```
 

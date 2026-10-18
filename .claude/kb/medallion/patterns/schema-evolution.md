@@ -1,205 +1,146 @@
 # Schema Evolution
 
-> **Purpose**: Handling schema changes across Medallion layers with Delta Lake / Iceberg evolution features
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Change schemas across Medallion layers without breaking consumers — additive evolution in Bronze, explicit DDL migrations in Silver/Gold, Delta defaults, type widening, column mapping, Iceberg equivalents
+> **Confidence**: 0.92
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Source systems add new columns that need to propagate through layers
-- Data types change or need widening (e.g., INT to BIGINT)
-- Columns are renamed or removed in upstream sources
-- Migrating from one schema version to another without downtime
+- A source adds columns that must flow through the layers
+- A column needs a wider type (INT → BIGINT, DECIMAL(10,2) → DECIMAL(12,2))
+- Columns are renamed or removed upstream
+- A Gold table's contract changes and consumers must not break
 
 ## Implementation
 
 ```python
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit, current_timestamp
-from delta.tables import DeltaTable
-
-spark = SparkSession.builder.getOrCreate()
+def existing_columns(table: str) -> set[str]:
+    return {f.name.lower() for f in spark.table(table).schema.fields}
 
 
-def configure_schema_evolution(table_name: str):
-    """Enable schema evolution features on a Delta table."""
-    spark.sql(f"""
-        ALTER TABLE {table_name} SET TBLPROPERTIES (
-            'delta.columnMapping.mode' = 'name',
-            'delta.minReaderVersion' = '2',
-            'delta.minWriterVersion' = '5'
-        )
-    """)
+def add_column(table: str, name: str, dtype: str, default_sql: str | None = None, comment: str = ""):
+    """Idempotent ADD COLUMN for an existing Delta table (Databricks or Delta OSS).
+    DEFAULT cannot be part of ADD COLUMN on an existing Delta table
+    (WRONG_COLUMN_DEFAULTS_FOR_DELTA_ALTER_TABLE_ADD_COLUMN_NOT_SUPPORTED):
+    add the column, then SET DEFAULT, which applies to rows inserted afterwards only."""
+    if name.lower() in existing_columns(table):
+        return                                          # rerun-safe without relying on IF NOT EXISTS
+    comment_sql = f" COMMENT '{comment}'" if comment else ""
+    spark.sql(f"ALTER TABLE {table} ADD COLUMN {name} {dtype}{comment_sql}")   # existing rows: NULL
+    if default_sql is not None:
+        # Needs the allowColumnDefaults table feature; otherwise the command fails with
+        # WRONG_COLUMN_DEFAULTS_FOR_DELTA_FEATURE_NOT_ENABLED.
+        spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES "
+                  f"('delta.feature.allowColumnDefaults' = 'supported')")
+        spark.sql(f"ALTER TABLE {table} ALTER COLUMN {name} SET DEFAULT {default_sql}")  # DBR 11.3 LTS+
 
 
-def bronze_schema_evolution(source_path: str, bronze_table: str):
-    """Bronze: Accept any schema changes from source automatically."""
-    raw_df = spark.read.option("mergeSchema", "true").json(source_path)
-
-    (
-        raw_df
-        .withColumn("_ingested_at", current_timestamp())
-        .write
-        .format("delta")
-        .mode("append")
-        .option("mergeSchema", "true")       # auto-add new columns
-        .saveAsTable(bronze_table)
-    )
+def widen_type(table: str, name: str, new_type: str):
+    """Metadata-only widening (DBR 15.4 LTS+ / Delta 4.0+): INT->BIGINT, DECIMAL(p,s)->wider, etc."""
+    spark.sql(f"ALTER TABLE {table} SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true')")
+    spark.sql(f"ALTER TABLE {table} ALTER COLUMN {name} TYPE {new_type}")
 
 
-def silver_schema_migration(silver_table: str, migrations: list[dict]):
-    """Apply explicit schema migrations to Silver tables."""
-    for migration in migrations:
-        action = migration["action"]
-
-        if action == "add_column":
-            spark.sql(f"""
-                ALTER TABLE {silver_table}
-                ADD COLUMN {migration['name']} {migration['type']}
-                {f"DEFAULT {migration['default']}" if 'default' in migration else ''}
-            """)
-
-        elif action == "rename_column":
-            spark.sql(f"""
-                ALTER TABLE {silver_table}
-                RENAME COLUMN {migration['old_name']} TO {migration['new_name']}
-            """)
-
-        elif action == "change_type":
-            spark.sql(f"""
-                ALTER TABLE {silver_table}
-                ALTER COLUMN {migration['name']} TYPE {migration['new_type']}
-            """)
-
-        elif action == "drop_column":
-            spark.sql(f"""
-                ALTER TABLE {silver_table}
-                DROP COLUMN {migration['name']}
-            """)
+def rename_or_drop(table: str, sql_clause: str):
+    """Rename/drop are metadata-only with column mapping. New tables: create with
+    'delta.columnMapping.mode' = 'id' (recommended; id mode can only be set at creation);
+    existing tables: set 'name' mode. Streaming readers then need a schemaTrackingLocation."""
+    spark.sql(f"ALTER TABLE {table} {sql_clause}")    # e.g. "RENAME COLUMN amt TO amount"
 
 
-# Usage
-migrations = [
-    {"action": "add_column", "name": "loyalty_tier", "type": "STRING", "default": "'standard'"},
-    {"action": "rename_column", "old_name": "amt", "new_name": "amount"},
-    {"action": "change_type", "name": "amount", "new_type": "DECIMAL(12,2)"},
-]
-silver_schema_migration("silver_sales.cleansed_orders", migrations)
+add_column("main.silver.orders", "loyalty_tier", "STRING", default_sql="'standard'")
+widen_type("main.silver.orders", "amount", "DECIMAL(12,2)")
 ```
 
 ## Configuration
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `delta.columnMapping.mode` | `none` | Set to `name` to enable rename/drop |
-| `mergeSchema` | `false` | Set to `true` to auto-add columns on write |
-| `overwriteSchema` | `false` | Set to `true` to replace schema entirely |
-| `delta.minReaderVersion` | `1` | Set to `2` for column mapping |
-| `delta.minWriterVersion` | `5` | Set to `5` for column mapping |
+|---|---|---|
+| `mergeSchema` (writer option) | `false` | Adds new source columns on append/overwrite writes; Bronze only |
+| `MERGE WITH SCHEMA EVOLUTION` / `INSERT WITH SCHEMA EVOLUTION` | — | Per-statement evolution: MERGE DBR 15.2+, INSERT DBR 18.1+ (Delta OSS 4.3+) |
+| `spark.databricks.delta.schema.autoMerge.enabled` | `false` | Legacy session-wide switch; prefer per-statement options |
+| `delta.columnMapping.mode` | `none` | `id` (new tables, recommended) or `name` (existing tables); reader 2 / writer 5 |
+| `delta.enableTypeWidening` | `false` | Enables `ALTER COLUMN ... TYPE` widenings without rewrite |
+| `delta.feature.allowColumnDefaults` | not enabled | Needed before `SET DEFAULT` on tables created without defaults |
+| `cloudFiles.schemaEvolutionMode` | `addNewColumns` | Auto Loader; `addNewColumnsWithTypeWidening` (DBR 16.4+, Public Preview), `rescue`, `failOnNewColumns`, `none` |
 
 ## Schema Evolution by Layer
 
 | Capability | Bronze | Silver | Gold |
-|-----------|--------|--------|------|
-| Auto-add columns | `mergeSchema=true` | Explicit migration | Schema follows Silver |
-| Rename columns | Not needed | `ALTER COLUMN RENAME` | Rebuild from Silver |
-| Drop columns | Never | With `columnMapping=name` (Delta) or native (Iceberg) | Rebuild from Silver |
-| Type widening | Not needed | `ALTER COLUMN TYPE` or type widening (Delta 4.0+) | Rebuild from Silver |
-| Full schema replace | Never | Rare, explicit | `overwriteSchema=true` |
-| Variant type (semi-structured) | Store as Variant (Delta 4.0+ / Iceberg v3) | Extract typed columns from Variant | N/A (use typed columns) |
+|---|---|---|---|
+| New columns | Automatic (`mergeSchema`, Auto Loader `addNewColumns`) or VARIANT payload | Explicit `ADD COLUMN`, or `MERGE WITH SCHEMA EVOLUTION` when intended | Explicit `ALTER TABLE ADD COLUMN` (DDL-first) |
+| Defaults | — | `ADD COLUMN`, then `ALTER COLUMN ... SET DEFAULT` | Same |
+| Rename / drop | Not needed | Column mapping + `RENAME/DROP COLUMN`; `REORG TABLE ... APPLY (PURGE)` rewrites dropped data | Same, after consumers migrate |
+| Type change | Not needed (strings/VARIANT) | Type widening; otherwise new column + backfill + swap | Same |
+| Full schema replace | Never | Never on shared tables | New table via DDL + `INSERT`, validate, swap; or `CREATE OR REPLACE TABLE` (keeps history and grants) |
+
+```python
+# Wrong: implicit contract change. Replaces schema and partitioning under every consumer in
+# one commit; streaming readers fail on the schema change; comments on recomputed columns
+# vanish. Do not use for Silver/Gold.
+df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("main.gold.orders")
+```
 
 ### Iceberg Schema Evolution at Each Layer
 
 ```sql
--- Bronze (Iceberg): auto-evolve schema on write
--- Iceberg handles schema evolution natively via metadata
+-- Iceberg (Spark + Iceberg runtime): add, rename, widen and drop are metadata operations
 ALTER TABLE catalog.bronze.raw_events ADD COLUMN new_field STRING;
-
--- Silver (Iceberg): explicit evolution with full support
 ALTER TABLE catalog.silver.orders RENAME COLUMN amt TO amount;
 ALTER TABLE catalog.silver.orders ALTER COLUMN quantity TYPE BIGINT;
 ALTER TABLE catalog.silver.orders DROP COLUMN deprecated_flag;
-
--- Gold (Iceberg): rebuild from Silver
-CREATE OR REPLACE TABLE catalog.gold.agg_revenue AS SELECT ...;
 ```
 
-## SQL Schema Migration Pattern
+## SQL Schema Migration Pattern (Delta on Databricks)
 
 ```sql
--- Step 1: Enable column mapping (one-time setup)
-ALTER TABLE silver_sales.cleansed_orders SET TBLPROPERTIES (
-    'delta.columnMapping.mode' = 'name',
-    'delta.minReaderVersion' = '2',
-    'delta.minWriterVersion' = '5'
-);
+-- 1. One-time: column mapping on an existing table (new tables: 'id' at CREATE)
+ALTER TABLE main.silver.orders SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name');
 
--- Step 2: Add new column with default
-ALTER TABLE silver_sales.cleansed_orders
-ADD COLUMN loyalty_tier STRING DEFAULT 'standard';
+-- 2. Add column, then its default for future rows, then backfill existing rows
+ALTER TABLE main.silver.orders ADD COLUMN loyalty_tier STRING COMMENT 'Customer tier';
+ALTER TABLE main.silver.orders SET TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported');
+ALTER TABLE main.silver.orders ALTER COLUMN loyalty_tier SET DEFAULT 'standard';
+UPDATE main.silver.orders
+SET loyalty_tier = CASE WHEN lifetime_revenue > 10000 THEN 'gold'
+                        WHEN lifetime_revenue > 5000  THEN 'silver'
+                        ELSE 'standard' END
+WHERE loyalty_tier IS NULL;
 
--- Step 3: Rename column
-ALTER TABLE silver_sales.cleansed_orders
-RENAME COLUMN amt TO amount;
-
--- Step 4: Widen data type
-ALTER TABLE silver_sales.cleansed_orders
-ALTER COLUMN amount TYPE DECIMAL(12,2);
-
--- Step 5: Drop deprecated column
-ALTER TABLE silver_sales.cleansed_orders
-DROP COLUMN legacy_field;
-
--- Step 6: Backfill new column
-UPDATE silver_sales.cleansed_orders
-SET loyalty_tier = CASE
-    WHEN lifetime_revenue > 10000 THEN 'gold'
-    WHEN lifetime_revenue > 5000 THEN 'silver'
-    ELSE 'standard'
-END
-WHERE loyalty_tier = 'standard';
+-- 3. Rename, widen, drop
+ALTER TABLE main.silver.orders RENAME COLUMN amt TO amount;
+ALTER TABLE main.silver.orders SET TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
+ALTER TABLE main.silver.orders ALTER COLUMN amount TYPE DECIMAL(12,2);
+ALTER TABLE main.silver.orders DROP COLUMN IF EXISTS legacy_field;   -- DBR 11.3 LTS+
 ```
 
-## Version Tracking
-
-```sql
--- Track schema versions for auditability
-CREATE TABLE IF NOT EXISTS meta.schema_versions (
-    table_name STRING,
-    version INT,
-    change_description STRING,
-    columns_added ARRAY<STRING>,
-    columns_removed ARRAY<STRING>,
-    columns_renamed MAP<STRING, STRING>,
-    applied_at TIMESTAMP,
-    applied_by STRING
-) USING DELTA;
-
--- Log migration
-INSERT INTO meta.schema_versions VALUES (
-    'silver_sales.cleansed_orders', 3,
-    'Added loyalty_tier column, renamed amt to amount',
-    ARRAY('loyalty_tier'), ARRAY(), MAP('amt', 'amount'),
-    current_timestamp(), 'pipeline_v2.1'
-);
-```
+`ADD COLUMN(S) IF NOT EXISTS` is **not** in the Databricks SQL, Apache Spark 4.2 or Delta Lake 4.4 `ALTER TABLE` references (only `DROP COLUMN IF EXISTS` and `ADD IF NOT EXISTS PARTITION` are). Databricks Runtime accepts it in practice (used in production DDL), but it is undocumented and fails with `PARSE_SYNTAX_ERROR` on open-source Spark 4.1 / Delta 4.1. If you rely on it, pin that to Databricks and re-test on each runtime upgrade; for portable, documented idempotency, check `information_schema.columns` or the table schema first, as in `add_column` above.
 
 ## Example Usage
 
 ```python
-# Full schema evolution workflow
-configure_schema_evolution("silver_sales.cleansed_orders")
-
-# Bronze auto-evolves
-bronze_schema_evolution("/mnt/landing/orders/", "bronze_sales.raw_orders")
-
-# Silver explicit migration
-silver_schema_migration("silver_sales.cleansed_orders", [
-    {"action": "add_column", "name": "channel", "type": "STRING", "default": "'web'"},
-])
+for col_name, dtype, default in [("channel", "STRING", "'web'"), ("is_test", "BOOLEAN", "false")]:
+    add_column("main.silver.orders", col_name, dtype, default_sql=default)
+spark.sql("DESCRIBE TABLE main.silver.orders").show()
 ```
 
 ## See Also
 
 - [Bronze Layer](../concepts/bronze-layer.md)
 - [Silver Layer](../concepts/silver-layer.md)
-- [Incremental Loading](../patterns/incremental-loading.md)
+- [Incremental Loading](incremental-loading.md)
+- [Schema migration (data-modeling)](../../data-modeling/patterns/schema-migration.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-alter-table-manage-column
+- https://docs.databricks.com/aws/en/error-messages/error-classes
+- https://docs.databricks.com/aws/en/tables/update-schema
+- https://docs.databricks.com/aws/en/tables/features/type-widening
+- https://docs.databricks.com/aws/en/tables/features/column-mapping
+- https://docs.databricks.com/aws/en/sql/language-manual/delta-merge-into
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-create-table-using
+- https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/schema
+- https://docs.databricks.com/aws/en/structured-streaming/delta-lake
+- https://spark.apache.org/docs/latest/sql-ref-syntax-ddl-alter-table.html
+- https://docs.delta.io/delta-batch/

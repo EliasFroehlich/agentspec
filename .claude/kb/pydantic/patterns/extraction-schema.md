@@ -1,7 +1,7 @@
 # Extraction Schema
 
 > **Purpose**: Design Pydantic schemas optimized for LLM-based document data extraction
-> **MCP Validated**: 2026-02-17
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
@@ -13,19 +13,19 @@
 ## Implementation
 
 ```python
-from pydantic import BaseModel, Field, model_validator
-from typing import Annotated, Literal, Optional
 from datetime import date
-from enum import Enum
+from enum import StrEnum
+from typing import Annotated, Self
 
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 # --- Reusable annotated types for extraction ---
-NonEmptyStr = Annotated[str, Field(min_length=1, strip_whitespace=True)]
+NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Confidence = Annotated[float, Field(ge=0.0, le=1.0, description="Extraction confidence 0-1")]
 MoneyAmount = Annotated[float, Field(ge=0, description="Monetary amount")]
 
 
-class Currency(str, Enum):
+class Currency(StrEnum):   # enum.StrEnum, Python 3.11+
     USD = "USD"
     EUR = "EUR"
     GBP = "GBP"
@@ -34,22 +34,22 @@ class Currency(str, Enum):
 
 class Address(BaseModel):
     """Postal address extracted from document."""
-    street: Optional[str] = Field(None, description="Street address line")
-    city: Optional[str] = Field(None, description="City name")
-    state: Optional[str] = Field(None, description="State or province")
-    postal_code: Optional[str] = Field(None, description="ZIP or postal code")
+    street: str | None = Field(default=None, description="Street address line")
+    city: str | None = Field(default=None, description="City name")
+    state: str | None = Field(default=None, description="State or province")
+    postal_code: str | None = Field(default=None, description="ZIP or postal code")
     country: str = Field(default="US", description="ISO 3166-1 alpha-2 country code")
 
 
 class LineItem(BaseModel):
     """Single line item from an invoice or receipt."""
-    description: NonEmptyStr = Field(..., description="Item or service description")
+    description: NonEmptyStr = Field(description="Item or service description")
     quantity: float = Field(default=1.0, ge=0, description="Quantity")
-    unit_price: MoneyAmount = Field(..., description="Price per unit")
-    total: Optional[MoneyAmount] = Field(None, description="Line total if stated")
+    unit_price: MoneyAmount = Field(description="Price per unit")
+    total: MoneyAmount | None = Field(default=None, description="Line total if stated")
 
     @model_validator(mode="after")
-    def compute_total(self) -> "LineItem":
+    def compute_total(self) -> Self:
         if self.total is None:
             self.total = round(self.quantity * self.unit_price, 2)
         return self
@@ -57,26 +57,27 @@ class LineItem(BaseModel):
 
 class InvoiceExtraction(BaseModel):
     """Complete invoice extraction schema for LLM output."""
-    invoice_number: NonEmptyStr = Field(..., description="Invoice ID or number")
-    vendor_name: NonEmptyStr = Field(..., description="Vendor or supplier name")
-    vendor_address: Optional[Address] = Field(None, description="Vendor address")
-    customer_name: Optional[str] = Field(None, description="Customer or buyer name")
-    issue_date: date = Field(..., description="Invoice issue date (YYYY-MM-DD)")
-    due_date: Optional[date] = Field(None, description="Payment due date")
+    invoice_number: NonEmptyStr = Field(description="Invoice ID or number")
+    vendor_name: NonEmptyStr = Field(description="Vendor or supplier name")
+    vendor_address: Address | None = Field(default=None, description="Vendor address")
+    customer_name: str | None = Field(default=None, description="Customer or buyer name")
+    issue_date: date = Field(description="Invoice issue date (YYYY-MM-DD)")
+    due_date: date | None = Field(default=None, description="Payment due date")
     currency: Currency = Field(default=Currency.USD, description="Currency code")
-    line_items: list[LineItem] = Field(..., min_length=1, description="Invoice line items")
-    subtotal: Optional[MoneyAmount] = None
-    tax_amount: Optional[MoneyAmount] = Field(default=0.0)
-    total_amount: MoneyAmount = Field(..., description="Total invoice amount")
+    line_items: list[LineItem] = Field(min_length=1, description="Invoice line items")
+    subtotal: MoneyAmount | None = None
+    tax_amount: MoneyAmount | None = Field(default=0.0)
+    total_amount: MoneyAmount = Field(description="Total invoice amount")
     extraction_confidence: Confidence = Field(
         default=0.5, description="Overall extraction confidence"
     )
 
     @model_validator(mode="after")
-    def validate_totals(self) -> "InvoiceExtraction":
-        computed = sum(item.total or 0 for item in self.line_items)
+    def validate_totals(self) -> Self:
+        if self.due_date and self.due_date < self.issue_date:
+            raise ValueError("due_date cannot be before issue_date")
         if self.subtotal is None:
-            self.subtotal = round(computed, 2)
+            self.subtotal = round(sum(item.total or 0 for item in self.line_items), 2)
         return self
 ```
 
@@ -85,16 +86,16 @@ class InvoiceExtraction(BaseModel):
 | Schema Design Rule | Rationale |
 |--------------------|-----------|
 | Use `Field(description=...)` on every field | Descriptions become LLM instructions via JSON Schema |
-| Make non-essential fields `Optional` with defaults | LLMs may miss fields; graceful degradation |
-| Use `Literal` or `Enum` for constrained values | Reduces LLM hallucination in category fields |
+| Make non-essential fields `X \| None = None` | LLMs may miss fields; graceful degradation |
+| Use `Literal` or `StrEnum` for constrained values | Reduces LLM hallucination in category fields |
+| Normalize strings with `StringConstraints` | `Field()` has no `strip_whitespace` argument |
 | Add `extraction_confidence` field | Lets LLM self-report uncertainty |
 | Keep line items as `list[Model]` | Structured, validated nested extraction |
 
 ## Example Usage
 
 ```python
-import json
-from patterns.llm_output_validation import validate_llm_output, build_format_instruction
+# validate_llm_output() and build_format_instruction() are defined in llm-output-validation.md
 
 
 # Build extraction prompt
@@ -135,7 +136,7 @@ print(f"Total: {invoice.currency.value} {invoice.total_amount}")
 
 ```text
 [ ] Every field has a description (for JSON Schema generation)
-[ ] Non-critical fields are Optional with defaults
+[ ] Non-critical fields are `X | None` with defaults
 [ ] Enum/Literal used for categorical fields
 [ ] Nested models for structured sub-objects
 [ ] model_validator for cross-field consistency
@@ -149,3 +150,9 @@ print(f"Total: {invoice.currency.value} {invoice.total_amount}")
 - [LLM Output Validation](../patterns/llm-output-validation.md)
 - [Nested Models](../concepts/nested-models.md)
 - [Invoice Schema Spec](../specs/invoice-schema.yaml)
+
+## Sources
+
+- https://docs.pydantic.dev/latest/api/types/
+- https://docs.pydantic.dev/latest/concepts/validators/
+- https://docs.python.org/3/library/enum.html

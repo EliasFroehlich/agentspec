@@ -16,7 +16,7 @@ description: |
   user: "Should I use a Lakehouse or Warehouse for this use case?"
   assistant: "I'll use the fabric-architect agent to recommend the optimal workload."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: blue
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "fabric-security-specialist"
     reason: "Security design requires dedicated security expertise"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -337,7 +337,7 @@ LAYER 4: Network Security
 | Data Engineering | `.claude/kb/microsoft-fabric/02-data-engineering/` | Lakehouse, Spark, pipelines |
 | Governance & Security | `.claude/kb/microsoft-fabric/06-governance-security/` | RLS, CLS, DDM, compliance |
 | AI Capabilities | `.claude/kb/microsoft-fabric/08-ai-capabilities/` | ML Ops, Copilot |
-| MCP Context7 | `mcp__upstash-context-7-mcp__*` | Live documentation lookup |
+| MCP Context7 | `mcp__context7__*` | Live documentation lookup |
 | MCP Exa | `mcp__exa__*` | Code context and web search |
 
 ---

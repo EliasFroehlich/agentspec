@@ -6,7 +6,7 @@
 
 ## Overview
 
-Feature stores solve the training-serving skew problem by providing a single system for defining, storing, and serving ML features. They maintain two stores: an **offline store** (data lake/warehouse) for historical training data with point-in-time correctness, and an **online store** (Redis, DynamoDB) for low-latency inference serving. In 2026, the landscape includes Feast (dominant OSS), Tecton (enterprise), Hopsworks (feature platform with native vector support), and cloud-native options (Databricks Feature Store, SageMaker Feature Store). Key 2026 trends: vector feature support, streaming feature computation, and declarative feature definitions.
+Feature stores solve the training-serving skew problem by providing a single system for defining, storing, and serving ML features. They maintain two stores: an **offline store** (data lake/warehouse) for historical training data with point-in-time correctness, and an **online store** (Redis, DynamoDB) for low-latency inference serving. The landscape includes Feast (open source, 0.67), Tecton (enterprise), Hopsworks (feature platform with native vector support), and cloud-native options: Databricks Feature Store in Unity Catalog (feature tables plus declarative Feature Views, online serving on Lakebase; the non-UC Workspace Feature Store is deprecated) and SageMaker Feature Store. Trends: vector features (Feast has an alpha vector-DB integration), streaming feature computation, and declarative feature definitions.
 
 ## The Concept
 
@@ -78,10 +78,10 @@ TRAINING (Offline Path)                    SERVING (Online Path)
 
 | Platform | Online Store | Offline Store | Streaming | Vector | Best For |
 |----------|-------------|---------------|-----------|--------|----------|
-| Feast | Redis, DynamoDB | Parquet, BQ | Basic (push) | No | OSS, flexible |
+| Feast | Redis, DynamoDB, others | Parquet, BQ, others | Basic (push) | Alpha (Milvus, pgvector, Elasticsearch, Qdrant, SQLite) | OSS, flexible |
 | Tecton | Managed (<5ms) | Managed | Full | No | Enterprise |
 | Hopsworks | RonDB (<5ms) | Hudi/Delta | Full | Native | Feature platform |
-| Databricks FS | Databricks | Delta Lake | Full | Yes | Databricks shops |
+| Databricks Feature Store (UC) | Online Feature Store (Lakebase) | Delta tables in Unity Catalog | Feature Views, Lakeflow | — | Databricks shops; point-in-time joins, lineage |
 | SageMaker FS | DynamoDB | S3/Parquet | Full | No | AWS shops |
 
 ## Common Mistakes
@@ -120,3 +120,11 @@ training_df = store.get_historical_features(
 - [embedding-pipelines](../concepts/embedding-pipelines.md)
 - [llmops-patterns](../concepts/llmops-patterns.md)
 - [feature-engineering](../patterns/feature-engineering.md)
+- [uc-feature-engineering](../patterns/uc-feature-engineering.md)
+
+## Sources
+
+- https://docs.feast.dev/getting-started/concepts/point-in-time-joins
+- https://docs.feast.dev/reference/alpha-vector-database
+- https://docs.databricks.com/aws/en/machine-learning/feature-store/
+- https://pypi.org/project/feast/

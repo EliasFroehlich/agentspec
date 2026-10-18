@@ -110,7 +110,7 @@
       "path": ".claude/agents/data-engineering/airflow-specialist.md",
       "tier": "T3",
       "model": "sonnet",
-      "description": "Apache Airflow 3.0 SME for DAG development, asset-aware scheduling, and event-driven pipelines.",
+      "description": "Apache Airflow 3.x SME for DAG development, asset-aware scheduling, and event-driven pipelines.",
       "kb_domains": [
         "airflow",
         "sql-patterns",
@@ -200,7 +200,7 @@
       "path": ".claude/agents/cloud/ci-cd-specialist.md",
       "tier": "T3",
       "model": "sonnet",
-      "description": "DevOps expert for Azure DevOps, Terraform, and Databricks Asset Bundles. Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.",
+      "description": "DevOps expert for Azure DevOps, Terraform, and Declarative Automation Bundles (DABs, formerly Databricks Asset Bundles). Builds CI/CD pipelines for Lambda and Lakeflow deployment with multi-environment promotion. Uses KB + MCP validation for production-ready automation.",
       "kb_domains": [
         "terraform",
         "aws",
@@ -244,6 +244,9 @@
       "model": "sonnet",
       "description": "Expert code review specialist ensuring quality, security, and maintainability.",
       "kb_domains": [
+        "python",
+        "testing",
+        "pydantic",
         "data-quality",
         "sql-patterns",
         "dbt"
@@ -304,7 +307,7 @@
       "path": ".claude/agents/test/data-quality-analyst.md",
       "tier": "T2",
       "model": "sonnet",
-      "description": "Data quality specialist for Great Expectations, Soda, dbt tests, data contracts, and observability.",
+      "description": "Data quality specialist for Databricks-native quality (expectations, constraints, data quality monitoring), Great Expectations, Soda, pandera, dbt tests, data contracts, and observability.",
       "kb_domains": [
         "data-quality",
         "dbt",
@@ -322,7 +325,7 @@
       "path": ".claude/agents/data-engineering/dbt-specialist.md",
       "tier": "T2",
       "model": "sonnet",
-      "description": "dbt Core and dbt Cloud specialist for model development, testing, macros, and project management.",
+      "description": "dbt specialist (dbt v1 and v2, dbt platform, dbt-databricks) for model development, testing, macros, and project management.",
       "kb_domains": [
         "dbt",
         "data-quality",
@@ -510,7 +513,7 @@
       "path": ".claude/agents/data-engineering/lakeflow-architect.md",
       "tier": "T3",
       "model": "sonnet",
-      "description": "Databricks Lakeflow expert for building Medallion architecture pipelines. Creates Bronze/Silver/Gold layers with DLT. Uses KB + MCP validation.",
+      "description": "Databricks Lakeflow expert for building Medallion architecture pipelines. Creates Bronze/Silver/Gold layers with Lakeflow Spark Declarative Pipelines (formerly DLT) and designs their orchestration with Lakeflow Jobs. Uses KB + MCP validation.",
       "kb_domains": [
         "lakeflow",
         "lakehouse",
@@ -529,7 +532,7 @@
       "path": ".claude/agents/data-engineering/lakeflow-expert.md",
       "tier": "T3",
       "model": "sonnet",
-      "description": "Databricks Lakeflow (DLT) SME for pipeline development, CDC, data quality, and production deployment. Uses KB + MCP validation.",
+      "description": "Databricks Lakeflow pipelines SME (Lakeflow Spark Declarative Pipelines, formerly DLT) for pipeline development, CDC, data quality, and production deployment with Lakeflow Jobs. Uses KB + MCP validation.",
       "kb_domains": [
         "lakeflow",
         "lakehouse",
@@ -548,7 +551,7 @@
       "path": ".claude/agents/data-engineering/lakeflow-pipeline-builder.md",
       "tier": "T3",
       "model": "sonnet",
-      "description": "Builds Databricks Lakeflow (DLT) pipelines for Medallion Architecture. Uses KB + MCP validation for production-ready pipelines.",
+      "description": "Builds Databricks Lakeflow pipelines (Lakeflow Spark Declarative Pipelines, formerly DLT) for Medallion Architecture, plus the Lakeflow Jobs and DABs configuration that schedule and deploy them. Uses KB + MCP validation for production-ready pipelines.",
       "kb_domains": [
         "lakeflow",
         "lakehouse",
@@ -567,7 +570,7 @@
       "path": ".claude/agents/data-engineering/lakeflow-specialist.md",
       "tier": "T1",
       "model": "sonnet",
-      "description": "Databricks Lakeflow (DLT) specialist for declarative pipelines, materialized views, streaming tables, and expectations.",
+      "description": "Databricks Lakeflow pipelines specialist (Lakeflow Spark Declarative Pipelines, formerly DLT) for declarative pipelines, materialized views, streaming tables, flows, sinks, and expectations.",
       "kb_domains": [
         "lakeflow",
         "lakehouse",
@@ -712,6 +715,7 @@
       "escalates_to": [
         "ai-data-engineer",
         "spark-engineer",
+        "ai-data-engineer",
         "ai-data-engineer"
       ]
     },
@@ -725,7 +729,8 @@
       "kb_domains": [
         "data-modeling",
         "sql-patterns",
-        "data-quality"
+        "data-quality",
+        "metric-views"
       ],
       "escalates_to": [
         "dbt-specialist",
@@ -903,9 +908,10 @@
       "model": "sonnet",
       "description": "Test automation expert for Python. Generates pytest unit tests, integration tests, and fixtures.",
       "kb_domains": [
+        "testing",
+        "python",
         "data-quality",
-        "dbt",
-        "testing"
+        "dbt"
       ],
       "escalates_to": [
         "schema-designer",

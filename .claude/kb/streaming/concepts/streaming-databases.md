@@ -1,19 +1,18 @@
 # Streaming Databases
 
-> **Purpose**: RisingWave 2.5, Materialize — streaming SQL databases for continuous aggregation
-> **Version Coverage**: RisingWave 2.5+ (Aug 2025), Materialize (SaaS)
-> **Confidence**: 0.88
-> **MCP Validated**: 2026-03-26
+> **Purpose**: RisingWave and Materialize: Postgres-compatible streaming SQL with incrementally maintained materialized views
+> **Version Coverage**: RisingWave 3.1.0 (2026-09-21) / 3.0.5 (2026-10-12); Materialize Cloud and Self-Managed (v26.x)
+> **Confidence**: HIGH
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Streaming databases (RisingWave, Materialize) run SQL queries continuously over event streams, maintaining materialized views that update in real-time. Unlike Flink/Spark Streaming which process in micro-batches or event-at-a-time, streaming databases feel like Postgres — you write SQL and it stays current.
+Streaming databases run SQL continuously over event streams and keep materialized views up to date as data arrives. You write Postgres-style SQL, query the views like tables, and the engine handles state, consistency and recovery. They trade the flexibility of Flink/Spark code for a much smaller operational surface.
 
 ## The Concept
 
 ```sql
--- RisingWave: Postgres-compatible streaming SQL
--- Connect to Kafka source
+-- RisingWave: Kafka source + incrementally maintained view
 CREATE SOURCE kafka_events (
     event_id    VARCHAR,
     user_id     VARCHAR,
@@ -23,23 +22,21 @@ CREATE SOURCE kafka_events (
 ) WITH (
     connector = 'kafka',
     topic = 'raw_events',
-    properties.bootstrap.server = 'kafka:9092',
+    properties.bootstrap.server = 'broker1:9092',
     scan.startup.mode = 'earliest'
 ) FORMAT PLAIN ENCODE JSON;
 
--- Materialized view: auto-updates as events arrive
 CREATE MATERIALIZED VIEW mv_revenue_per_minute AS
-SELECT
-    date_trunc('minute', event_ts) AS minute_window,
-    event_type,
-    COUNT(*) AS event_count,
-    SUM(amount) AS total_revenue,
-    COUNT(DISTINCT user_id) AS unique_users
+SELECT date_trunc('minute', event_ts) AS minute_window,
+       event_type,
+       COUNT(*)                AS event_count,
+       SUM(amount)             AS total_revenue,
+       COUNT(DISTINCT user_id) AS unique_users
 FROM kafka_events
 WHERE event_type = 'purchase'
 GROUP BY 1, 2;
 
--- Query like Postgres (always fresh)
+-- Reads are plain SQL over always-fresh results
 SELECT * FROM mv_revenue_per_minute
 WHERE minute_window > NOW() - INTERVAL '1 hour'
 ORDER BY minute_window DESC;
@@ -48,23 +45,22 @@ ORDER BY minute_window DESC;
 ## Quick Reference
 
 | Feature | RisingWave | Materialize | Flink SQL |
-|---------|-----------|------------|-----------|
-| SQL dialect | PostgreSQL | PostgreSQL | Flink SQL (ANSI+) |
-| Deployment | Cloud / self-hosted | Cloud-only (SaaS) | Self-hosted / managed |
-| Source | Kafka, Postgres CDC, S3 | Kafka, Postgres CDC | Kafka, files, JDBC |
-| Sink | Kafka, JDBC, S3, Iceberg | Kafka, Postgres, webhooks | Kafka, JDBC, Iceberg |
-| State backend | Hummock (LSM on S3) | Differential dataflow | RocksDB |
-| Best for | Wide SQL compat, cost-efficient | Complex joins/aggregations | Full streaming ecosystem |
-| Latency | Sub-second | Sub-second | Milliseconds (per-event) |
-| Cost model | Compute-based | Consumption-based | Cluster-based |
+|---------|-----------|-------------|-----------|
+| SQL dialect | PostgreSQL | PostgreSQL | Flink SQL |
+| Deployment | Cloud (Basic, Pro incl. BYOC) or self-managed (Apache 2.0) | Cloud or Self-Managed on Kubernetes (Helm/Terraform, AWS/Azure/GCP) | Self-hosted or managed services |
+| Sources | Kafka, Postgres/MySQL/SQL Server CDC, S3, WebSocket (3.0+) | Kafka, Postgres/MySQL/SQL Server CDC, webhooks | Kafka, files, JDBC, CDC connectors |
+| Sinks | Kafka, JDBC, Iceberg, HTTP (3.0+), others | Kafka, Iceberg | Kafka, JDBC, Iceberg, others |
+| State | Hummock (LSM tree on object storage) | Differential dataflow | HashMap, RocksDB or ForSt (2.0+) |
+| Best for | Streaming SQL apps, Iceberg-centric lakehouse | Strongly consistent views over complex joins | Full streaming programming model |
+
+Materialize Self-Managed needs a license key since v26.0; the Community license is free up to 24 GiB memory / 48 GiB disk.
 
 ## Common Mistakes
 
 ### Wrong
 
 ```sql
--- Running complex windowed aggregation in application code
--- Polling database every second for updated counts
+-- Polling a regular table every second from application code
 SELECT COUNT(*) FROM events WHERE event_ts > NOW() - INTERVAL '5 min';
 ```
 
@@ -75,59 +71,77 @@ SELECT COUNT(*) FROM events WHERE event_ts > NOW() - INTERVAL '5 min';
 CREATE MATERIALIZED VIEW live_counts AS
 SELECT COUNT(*) AS recent_events
 FROM kafka_events
-WHERE event_ts > NOW() - INTERVAL '5 minutes';
--- Query is always pre-computed, sub-millisecond reads
+WHERE event_ts > NOW() - INTERVAL '5 minutes';   -- temporal filter keeps state bounded
 ```
 
-## RisingWave 2.5 New Features (Aug 2025)
+## RisingWave Release Highlights
 
-### Native Apache Iceberg Integration
+| Version | Date | Highlights |
+|---------|------|------------|
+| 2.5.0 | 2025-07-29 | `backfill_order` (technical preview), `openai_embedding`, automatic Iceberg maintenance |
+| 2.6.0 | 2025-09-25 | `vector(n)` type; `openai_embedding` now takes one constant JSONB config |
+| 3.0.0 | 2026-06-11 | Iceberg V3, native pgvector ingestion, WebSocket source, HTTP sink, exactly-once delivery, DataFusion default for batch queries, automatic MV reuse in batch queries |
+| 3.1.0 | 2026-09-21 | `VARIANT` type, periodically refreshed materialized views, partitioned gap filling |
+
+### Embeddings (2.6+ signature)
 
 ```sql
--- RisingWave 2.5: native Iceberg sink with auto-compaction
-CREATE SINK iceberg_orders INTO iceberg_catalog.db.orders
-FROM mv_orders
+-- openai_embedding(config constant jsonb, input text) -> real[]
+CREATE FUNCTION get_embedding(varchar) RETURNS REAL[] LANGUAGE sql AS $$
+    SELECT openai_embedding('{"model": "text-embedding-3-small", "api_key": "<API_KEY>"}'::jsonb, $1)
+$$;
+
+CREATE MATERIALIZED VIEW product_embeddings AS
+SELECT product_id, product_name, get_embedding(description) AS embedding
+FROM products;
+```
+
+### Backfill Order Control (technical preview, MVs only)
+
+```sql
+-- Backfill dimension tables before the fact table to avoid join amplification
+CREATE MATERIALIZED VIEW mv_orders_enriched
+WITH (backfill_order = FIXED(dim_customer -> fact_orders, dim_product -> fact_orders))
+AS SELECT f.order_id, c.segment, p.category, f.amount
+FROM fact_orders f
+JOIN dim_customer c ON f.customer_id = c.customer_id
+JOIN dim_product  p ON f.product_id  = p.product_id;
+-- source_rate_limit (in WITH) throttles backfill; it does not control order
+```
+
+### Iceberg Sink with Automatic Maintenance
+
+```sql
+CREATE SINK iceberg_orders FROM mv_orders_enriched
 WITH (
     connector = 'iceberg',
     type = 'upsert',
     primary_key = 'order_id',
-    enable_compaction = true,           -- auto-compact small files
-    snapshot_expiration_interval = '7d' -- auto-expire old snapshots
+    warehouse.path = 's3://my-bucket/warehouse',
+    database.name = 'sales',
+    table.name = 'orders_enriched',
+    catalog.type = 'rest',
+    catalog.uri = 'http://rest-catalog:8181',
+    enable_compaction = true,                  -- needs a dedicated Iceberg compactor node
+    enable_snapshot_expiration = true,         -- default true
+    snapshot_expiration_max_age_millis = 604800000
 );
+-- is_exactly_once defaults to true (requires sink decoupling, the default)
 ```
-
-### OpenAI Embedding Function
-
-```sql
--- Generate embeddings in real-time streaming pipelines
-CREATE MATERIALIZED VIEW product_embeddings AS
-SELECT
-    product_id,
-    product_name,
-    openai_embedding(description, 'text-embedding-3-small') AS embedding
-FROM products_stream;
-```
-
-### Backfill Order Control
-
-```sql
--- Fine-grained control over MV backfill ordering
--- Prioritize specific tables during initial materialization
-SET backfill_rate_limit = 1000;  -- rows per second
-```
-
-### RisingWave Positioning (2025)
-
-| Capability | Detail |
-|-----------|--------|
-| Branding | "Event Streaming Platform" (not just streaming DB) |
-| Iceberg native | First-class Iceberg table engine + sink |
-| Cloud tiers | Basic (free), Pro (enterprise), Dedicated |
-| Python interface | DataFrame-style API alongside SQL |
-| AI integration | Built-in embedding functions, vector similarity |
 
 ## Related
 
 - [stream-processing-fundamentals](stream-processing-fundamentals.md)
 - [flink-architecture](flink-architecture.md)
 - [flink-sql-patterns](../patterns/flink-sql-patterns.md)
+
+## Sources
+
+- https://docs.risingwave.com/changelog/release-notes
+- https://risingwave.com/blog/announcing-risingwave-3-0-the-real-time-data-platform-for-agentic-ai/
+- https://docs.risingwave.com/sql/functions/ai
+- https://docs.risingwave.com/sql/commands/sql-create-mv
+- https://docs.risingwave.com/iceberg/deliver-to-iceberg · https://docs.risingwave.com/iceberg/maintenance
+- https://risingwave.com/pricing/
+- https://materialize.com/docs/self-managed-deployments/ · https://materialize.com/docs/license/
+- https://materialize.com/changelog/2025-11-18-v26-release/ · https://materialize.com/docs/sql/create-source/ · https://materialize.com/docs/sql/create-sink/

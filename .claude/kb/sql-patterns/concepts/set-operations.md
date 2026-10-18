@@ -1,95 +1,119 @@
 # Set Operations
 
-> **Purpose**: UNION/INTERSECT/EXCEPT, LATERAL joins, UNNEST/FLATTEN, ASOF JOIN across dialects
+> **Purpose**: UNION/INTERSECT/EXCEPT, LATERAL subqueries, UNNEST/FLATTEN/explode and ASOF JOIN across dialects — plus ANSI type coercion of set operations in Spark 4 / Databricks
 > **Confidence**: 0.90
-> **MCP Validated**: 2026-03-26 | Updated with ASOF JOIN cross-references
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Set operations combine result sets vertically (UNION, INTERSECT, EXCEPT), while LATERAL joins and UNNEST/FLATTEN handle array/struct expansion. Syntax varies significantly across Snowflake, BigQuery, DuckDB, and Spark SQL — especially for semi-structured data operations.
+Set operations combine result sets vertically (UNION, INTERSECT, EXCEPT); LATERAL subqueries and
+UNNEST/FLATTEN/explode expand per-row arrays or correlated lookups. Column types of each branch are
+resolved to a **least common type** — under ANSI mode (Spark 4.0+, Databricks DBR 17.0+) a STRING
+branch combined with a numeric branch is cast to the numeric type, so one bad value fails the query.
 
 ## The Concept
 
 ```sql
--- UNION ALL (keep duplicates) vs UNION (deduplicate)
+-- UNION ALL keeps duplicates (no sort/dedup); UNION removes them
 SELECT order_id, amount FROM online_orders
 UNION ALL
 SELECT order_id, amount FROM store_orders;
 
--- INTERSECT — rows in both sets
-SELECT customer_id FROM web_customers
-INTERSECT
-SELECT customer_id FROM mobile_customers;
+SELECT customer_id FROM web_customers INTERSECT SELECT customer_id FROM mobile_customers;
+SELECT customer_id FROM all_customers EXCEPT SELECT customer_id FROM churned_customers;
+-- BigQuery spells these INTERSECT DISTINCT / EXCEPT DISTINCT
 
--- EXCEPT — rows in first but not second
-SELECT customer_id FROM all_customers
-EXCEPT
-SELECT customer_id FROM churned_customers;
-
--- LATERAL JOIN — correlated subquery as a table
--- PostgreSQL / DuckDB / Snowflake
+-- LATERAL: a subquery that can reference columns of preceding FROM items
+-- Postgres / DuckDB / Snowflake
 SELECT c.customer_id, recent.order_id, recent.amount
 FROM customers c
 CROSS JOIN LATERAL (
-    SELECT order_id, amount
-    FROM orders o
+    SELECT order_id, amount FROM orders o
     WHERE o.customer_id = c.customer_id
-    ORDER BY order_date DESC
-    LIMIT 3
+    ORDER BY order_date DESC LIMIT 3
 ) recent;
+
+-- Spark SQL / Databricks: LATERAL subquery in the FROM list
+SELECT * FROM t1,
+  LATERAL (SELECT * FROM t2 WHERE t1.c1 = t2.c1);
+-- For top-N per key in Spark, prefer ROW_NUMBER() + QUALIFY (Databricks) / filter (OSS)
 ```
 
 ## Quick Reference
 
-| Operation | Snowflake | BigQuery | DuckDB | Spark SQL |
-|-----------|-----------|----------|--------|-----------|
-| `UNION ALL` | Standard | Standard | Standard | Standard |
-| `INTERSECT` | Standard | Standard | Standard | Standard |
+| Operation | Snowflake | BigQuery | DuckDB | Spark SQL / Databricks |
+|-----------|-----------|----------|--------|------------------------|
+| `UNION ALL` | Standard | Standard | Standard | Standard (`unionByName` in DataFrames) |
+| `INTERSECT` | Standard | `INTERSECT DISTINCT` | Standard | Standard |
 | `EXCEPT` | Standard | `EXCEPT DISTINCT` | Standard | Standard |
-| `LATERAL JOIN` | `LATERAL` | Subquery in SELECT | `LATERAL` | Not supported |
-| Array unnest | `FLATTEN(col)` | `UNNEST(col)` | `UNNEST(col)` | `explode(col)` |
-| Struct access | `col:key` | `col.key` | `col.key` | `col.key` |
+| `LATERAL` | `LATERAL` | Correlated subquery / `UNNEST` | `LATERAL` | `LATERAL` subquery; PySpark `DataFrame.lateralJoin` (4.0+) |
+| Array unnest | `LATERAL FLATTEN(col)` | `UNNEST(col)` | `UNNEST(col)` | `explode(col)` / `LATERAL VIEW explode` / `inline` |
+| Struct access | `col:key` (VARIANT) | `col.key` | `col.key` | `col.key`; Databricks JSON/VARIANT `col:key` |
 
 ## Common Mistakes
 
 ### Wrong
 
 ```sql
--- UNION when you mean UNION ALL — unnecessary dedup sort
+-- UNION when duplicates are impossible or acceptable: needless sort + dedup
 SELECT * FROM table_a
-UNION          -- sorts + deduplicates — expensive!
-SELECT * FROM table_b
+UNION
+SELECT * FROM table_b;
+
+-- Spark 4 / DBR 17+ (ANSI): branch types differ — id is BIGINT in a, STRING in b
+SELECT id FROM a
+UNION ALL
+SELECT id FROM b;          -- least common type BIGINT: 'A-17' raises CAST_INVALID_INPUT
 ```
 
 ### Correct
 
 ```sql
--- UNION ALL when duplicates are acceptable or impossible
 SELECT * FROM table_a
-UNION ALL      -- no sort, no dedup — much faster
-SELECT * FROM table_b
+UNION ALL
+SELECT * FROM table_b;
+
+SELECT CAST(id AS STRING) AS id FROM a
+UNION ALL
+SELECT id FROM b;          -- conform each branch to the type you intend
 ```
 
 ## ASOF JOIN (Temporal Lookup)
 
 ```sql
--- DuckDB: find most recent exchange rate for each order
+-- DuckDB: most recent exchange rate at or before each order
 SELECT o.order_id, o.amount, r.rate
 FROM orders o
 ASOF JOIN exchange_rates r
     ON o.currency = r.currency
    AND o.order_ts >= r.effective_ts;
--- Returns the r row with the largest effective_ts <= o.order_ts
+
+-- Snowflake: MATCH_CONDITION is required, ON is optional
+SELECT o.order_id, o.amount, r.rate
+FROM orders o
+ASOF JOIN exchange_rates r
+    MATCH_CONDITION (o.order_ts >= r.effective_ts)
+    ON o.currency = r.currency;
 ```
 
-| Dialect | ASOF JOIN Support | Alternative |
-|---------|-------------------|-------------|
-| DuckDB | Native `ASOF JOIN` | -- |
-| Snowflake | Preview | LATERAL + ORDER BY + LIMIT 1 |
+| Dialect | ASOF JOIN | Alternative |
+|---------|-----------|-------------|
+| DuckDB | Native | — |
+| Snowflake | Native (`MATCH_CONDITION`) | — |
 | BigQuery | No | Correlated subquery or window function |
-| Spark SQL | No | Window function with `LAST_VALUE` |
+| Spark SQL / Databricks | No | Window function with `LAST_VALUE` (ignoring nulls) over the time order, or range join + `ROW_NUMBER` |
 
 ## Related
 
 - [cte-patterns](../concepts/cte-patterns.md)
 - [cross-dialect](../patterns/cross-dialect.md)
+- [ANSI mode (Spark)](../../spark/concepts/ansi-mode.md)
+
+## Sources
+
+- https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-lateral-subquery.html
+- https://spark.apache.org/releases/spark-release-4-0-0.html
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-datatype-rules
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-ansi-compliance
+- https://docs.snowflake.com/en/sql-reference/constructs/asof-join
+- https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax

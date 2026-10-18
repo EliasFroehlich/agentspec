@@ -1,161 +1,144 @@
 # Document Extraction Pattern
 
-> **Purpose**: Production-ready pattern for extracting structured data from documents (invoices, contracts, reports)
-> **MCP Validated:** 2026-03-26
+> **Purpose**: Production pattern for extracting structured data from documents (invoices, contracts, reports) with schema-enforced output — Claude native PDF input, OpenAI, and Databricks SQL batch
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Extracting typed fields from PDF/image documents
-- Processing invoices, receipts, contracts, or forms
-- Building automated document processing pipelines
-- Any task requiring schema-validated extraction from unstructured text
+- Extracting typed fields from PDFs, scans or text documents
+- Processing invoices, receipts, contracts or forms at low or high volume
+- Building automated document pipelines with validation and human review for low-confidence results
 
-## Implementation
+## Implementation: Claude (native PDF + structured outputs)
 
 ```python
-import json
-from pydantic import BaseModel, Field, ValidationError
-from typing import Optional, List
-from openai import OpenAI
+import base64
+from typing import Literal, Optional
 
-client = OpenAI()
+import anthropic
+from pydantic import BaseModel, Field
 
-
-# --- Schema Definition ---
+client = anthropic.Anthropic()
 
 class LineItem(BaseModel):
-    description: str = Field(description="Item description")
-    quantity: Optional[float] = Field(None, description="Quantity as number")
-    unit_price: Optional[float] = Field(None, description="Unit price without currency")
-    total: Optional[float] = Field(None, description="Line total without currency")
+    description: str
+    quantity: Optional[float] = None
+    unit_price: Optional[float] = None
+    total: Optional[float] = None
 
 class DocumentExtraction(BaseModel):
-    document_type: str = Field(description="invoice | receipt | contract | form")
-    document_number: Optional[str] = Field(None, description="Document ID or number")
-    date: Optional[str] = Field(None, description="Document date in YYYY-MM-DD")
-    issuer_name: Optional[str] = Field(None, description="Company or person who issued")
-    recipient_name: Optional[str] = Field(None, description="Recipient name")
-    total_amount: Optional[float] = Field(None, description="Total amount as number")
-    currency: Optional[str] = Field(None, description="ISO 4217 currency code")
-    line_items: List[LineItem] = Field(default_factory=list)
-    notes: Optional[str] = Field(None, description="Additional notes or flags")
+    document_type: Literal["invoice", "receipt", "contract", "form", "other"]
+    document_number: Optional[str] = None
+    date: Optional[str] = Field(None, description="YYYY-MM-DD")
+    issuer_name: Optional[str] = None
+    recipient_name: Optional[str] = None
+    total_amount: Optional[float] = Field(None, description="Number only, no currency symbol")
+    currency: Optional[str] = Field(None, description="ISO 4217 code")
+    line_items: list[LineItem] = Field(default_factory=list)
+    notes: Optional[str] = Field(None, description="Ambiguities or anomalies a reviewer should check")
 
+SYSTEM = """You extract data from business documents for an automated ledger.
+Use only values printed in the document and leave fields null when absent, because downstream
+reconciliation treats guessed values as errors. Record anything ambiguous in notes."""
 
-# --- Extraction Prompt ---
+def extract_pdf(pdf_bytes: bytes) -> DocumentExtraction:
+    resp = client.messages.parse(
+        model="claude-sonnet-5-5",
+        max_tokens=16000,
+        system=SYSTEM,
+        messages=[{"role": "user", "content": [
+            {"type": "document",                      # PDF before the text instruction
+             "source": {"type": "base64", "media_type": "application/pdf",
+                        "data": base64.standard_b64encode(pdf_bytes).decode()}},
+            {"type": "text", "text": "Extract the document fields."},
+        ]}],
+        output_format=DocumentExtraction,
+    )
+    if resp.stop_reason != "end_turn":                # refusal or max_tokens: no valid object
+        raise RuntimeError(f"extraction stopped: {resp.stop_reason}")
+    return resp.parsed_output
 
-DOCUMENT_EXTRACTION_PROMPT = """You are an expert document data extraction system.
+def extract_text(document_text: str) -> DocumentExtraction:
+    resp = client.messages.parse(
+        model="claude-sonnet-5-5", max_tokens=16000, system=SYSTEM,
+        messages=[{"role": "user", "content": f"<document>\n{document_text}\n</document>"}],
+        output_format=DocumentExtraction,
+    )
+    return resp.parsed_output
+```
 
-## Task
-Extract all relevant fields from the document below into structured JSON.
+Limits for base64 PDFs: 32 MB per request and up to 600 pages (100 on 200K-context models). For the same file across
+many requests, upload once with the Files API (`client.files.upload`) and reference it by `file_id`.
 
-## Schema
-{schema}
+## Implementation: OpenAI (Responses API)
 
-## Rules
-1. Extract ONLY data explicitly present in the document
-2. If a field is not found, set it to null
-3. Dates: Convert to ISO 8601 (YYYY-MM-DD)
-4. Amounts: Numeric only, no currency symbols or commas
-5. Currency: Use ISO 4217 codes (USD, EUR, BRL, etc.)
-6. Line items: Extract all individual items if present
-7. NEVER fabricate or infer data not in the document
+```python
+from openai import OpenAI
 
-## Document Content
-{document_text}
+def extract_text_openai(document_text: str) -> DocumentExtraction:
+    resp = OpenAI().responses.parse(
+        model="gpt-6.1-sol",
+        input=[{"role": "system", "content": SYSTEM},
+               {"role": "user", "content": document_text}],
+        text_format=DocumentExtraction,
+    )
+    return resp.output_parsed
+```
 
-## Output
-Return ONLY a valid JSON object matching the schema above.
-"""
+## Implementation: Databricks SQL batch (`ai_parse_document` + `ai_extract`)
 
-
-# --- Extraction Function ---
-
-def extract_document(
-    document_text: str,
-    max_retries: int = 2
-) -> DocumentExtraction:
-    """Extract structured data from a document with retry logic."""
-
-    schema = json.dumps(DocumentExtraction.model_json_schema(), indent=2)
-
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                temperature=0.0,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a precise document extraction system. "
-                                   "Return only valid JSON."
-                    },
-                    {
-                        "role": "user",
-                        "content": DOCUMENT_EXTRACTION_PROMPT.format(
-                            schema=schema,
-                            document_text=document_text
-                        )
-                    }
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            raw_json = response.choices[0].message.content
-            return DocumentExtraction.model_validate_json(raw_json)
-
-        except ValidationError as e:
-            if attempt == max_retries:
-                raise ValueError(
-                    f"Extraction failed after {max_retries + 1} attempts: {e}"
-                )
-            # Log and retry
-            print(f"Validation error (attempt {attempt + 1}): {e}")
-
-    raise ValueError("Unreachable")
+```sql
+-- ai_parse_document: DBR 17.3+ (serverless env v3+); ai_extract: DBR 15.4 LTS+, v2.1 schema output.
+-- Run once per file and persist: every call is billed inference.
+CREATE OR REPLACE TABLE main.docs.invoice_fields AS
+WITH parsed AS (
+  SELECT path, ai_parse_document(content, map('version', '2.0')) AS doc
+  FROM read_files('/Volumes/main/docs/landing/', format => 'binaryFile')
+),
+text AS (
+  SELECT path,
+         concat_ws('\n', transform(variant_get(doc, '$.document.elements', 'ARRAY<VARIANT>'),
+                                   e -> variant_get(e, '$.content', 'STRING'))) AS body,
+         doc:error_status AS parse_errors              -- array of per-page errors; keep for review
+  FROM parsed
+)
+SELECT path, parse_errors,
+       r:response:document_number:value::STRING AS document_number,
+       r:response:total_amount:value::DOUBLE    AS total_amount,
+       r:response:currency:value::STRING        AS currency,
+       r:error_message::STRING                  AS extract_error
+FROM (
+  SELECT path, parse_errors, ai_extract(body,
+    '{"document_number": {"type": "string"}, "total_amount": {"type": "number"},
+      "currency": {"type": "string", "description": "ISO 4217 code"}}',
+    options => map('version', '2.1')) AS r
+  FROM text WHERE body IS NOT NULL AND body <> ''
+);
 ```
 
 ## Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `model` | `gpt-4o` | Model with strong extraction capability |
-| `temperature` | `0.0` | Deterministic extraction |
-| `max_retries` | `2` | Retry on validation failure |
-| `response_format` | `json_object` | API-level JSON enforcement |
+| `model` | `claude-sonnet-5-5` | `claude-haiku-5-5` for simple, high-volume forms; `claude-opus-5-5` for hard layouts |
+| `max_tokens` | `16000` | Room for thinking plus the JSON; current models think by default |
+| Output contract | `output_format=DocumentExtraction` | API-enforced; no schema text in the prompt, no JSON mode |
+| Retries | 1 on validation error | Re-ask with the Pydantic error message; then route to review |
+| Batch | Message Batches API | 50% cheaper for non-interactive backfills |
 
 ## Example Usage
 
 ```python
-sample_invoice = """
-INVOICE #INV-2024-0847
-Date: January 15, 2024
-
-From: Acme Corp
-To: Widget Inc
-
-Items:
+sample_invoice = """INVOICE #INV-2024-0847   Date: January 15, 2024
+From: Acme Corp   To: Widget Inc
 1. Cloud Hosting (Monthly) - 3 units @ $299.00 = $897.00
 2. SSL Certificate - 1 unit @ $49.99 = $49.99
-3. Support Plan (Premium) - 1 unit @ $199.00 = $199.00
+Total: $946.99 USD"""
 
-Subtotal: $1,145.99
-Tax (8%): $91.68
-Total: $1,237.67 USD
-"""
-
-result = extract_document(sample_invoice)
+result = extract_text(sample_invoice)
 print(result.model_dump_json(indent=2))
-# {
-#   "document_type": "invoice",
-#   "document_number": "INV-2024-0847",
-#   "date": "2024-01-15",
-#   "issuer_name": "Acme Corp",
-#   "recipient_name": "Widget Inc",
-#   "total_amount": 1237.67,
-#   "currency": "USD",
-#   "line_items": [...],
-#   "notes": null
-# }
+# {"document_type": "invoice", "document_number": "INV-2024-0847", "date": "2024-01-15",
+#  "issuer_name": "Acme Corp", "total_amount": 946.99, "currency": "USD", ...}
 ```
 
 ## See Also
@@ -163,3 +146,12 @@ print(result.model_dump_json(indent=2))
 - [Structured Extraction Concept](../concepts/structured-extraction.md)
 - [Multi-Pass Extraction](../patterns/multi-pass-extraction.md)
 - [Validation Prompts](../patterns/validation-prompts.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/build-with-claude/pdf-support
+- https://platform.claude.com/docs/en/build-with-claude/files
+- https://platform.openai.com/docs/guides/structured-outputs
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_parse_document
+- https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_extract

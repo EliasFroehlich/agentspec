@@ -1,185 +1,152 @@
 # Chatbot Architecture Pattern
 
-> **Purpose**: Production chatbot with LangGraph state management, MCP tools, guardrails, and RAG integration
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Production chatbot with intent routing, guardrails, RAG, remote MCP tools, and provider-side context management
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
 - Customer-facing conversational AI requiring reliability and safety
 - Support bots with intent routing and escalation flows
-- Domain-specific assistants that need grounded answers (RAG)
+- Domain assistants that need grounded answers (RAG) and a few transactional tools
 - Any chatbot requiring auditable conversation flows
 
 ## Architecture
 
 ```text
-                 +------------------+
-                 |   User Message   |
-                 +--------+---------+
-                          |
-                 +--------v---------+
-                 |   Input Rails    |  Jailbreak, PII, topic check
-                 +--------+---------+
-                          |
-                 +--------v---------+
-                 | Intent Classifier |  LLM or fine-tuned model
-                 +--------+---------+
-                          |
-          +---------------+---------------+
-          |               |               |
-  +-------v------+ +-----v------+ +------v-------+
-  |   FAQ / RAG  | |  Transact  | |  Escalation  |
-  | (retrieval)  | | (tool call)| | (human hand) |
-  +-------+------+ +-----+------+ +------+-------+
-          |               |               |
-          +---------------+---------------+
-                          |
-                 +--------v---------+
-                 |   Output Rails   |  Factuality, toxicity, format
-                 +--------+---------+
-                          |
-                 +--------v---------+
-                 |  Response + Cite  |
-                 +------------------+
+User message
+  └─ Input rails (injection, PII, topic)
+     └─ Intent classifier (small model, structured output)
+        ├─ FAQ / RAG        → retrieval + grounded answer with citations
+        ├─ Transactional    → tool calls (local tools or remote MCP via the MCP connector)
+        └─ Escalation       → human handoff
+     └─ Output rails (grounding, toxicity, format)
+        └─ Response + citations + trace
 ```
 
 ## Implementation
 
 ```python
 from dataclasses import dataclass, field
-from typing import Optional
 from enum import Enum
+from typing import Literal
 
-class Intent(Enum):
+import anthropic
+from pydantic import BaseModel
+
+client = anthropic.Anthropic()
+
+class Intent(str, Enum):
     FAQ = "faq"
     TRANSACTIONAL = "transactional"
     ESCALATION = "escalation"
     CHITCHAT = "chitchat"
-    UNKNOWN = "unknown"
 
-@dataclass
-class ConversationTurn:
-    role: str  # "user" or "assistant"
-    content: str
-    intent: Optional[Intent] = None
-    metadata: dict = field(default_factory=dict)
+class IntentResult(BaseModel):
+    intent: Literal["faq", "transactional", "escalation", "chitchat"]
 
 @dataclass
 class ChatbotConfig:
-    model: str = "claude-sonnet-4-6"
-    max_history_turns: int = 20
-    rag_enabled: bool = True
-    guardrails_enabled: bool = True
-    escalation_threshold: int = 3  # failed turns before escalation
-    system_prompt: str = ""
+    model: str = "claude-sonnet-5-5"
+    router_model: str = "claude-haiku-5-5"
+    system_prompt: str = "You are the support assistant for ACME. Answer only from provided sources."
+    escalation_threshold: int = 3          # failed turns before human handoff
 
+@dataclass
 class ProductionChatbot:
-    def __init__(self, config: ChatbotConfig, rag_pipeline=None,
-                 tool_registry=None, guardrail_pipeline=None):
-        self.config = config
-        self.rag = rag_pipeline
-        self.tools = tool_registry
-        self.guardrails = guardrail_pipeline
-        self.history: list[ConversationTurn] = []
-        self.failed_turns: int = 0
+    config: ChatbotConfig
+    rag: object | None = None
+    guardrails: object | None = None
+    messages: list[dict] = field(default_factory=list)   # append-only history
+    failed_turns: int = 0
 
-    async def respond(self, user_message: str) -> str:
-        # 1. Input guardrails
-        if self.guardrails:
-            rail_result = self.guardrails.check_input(user_message)
-            if rail_result.action == "block":
-                return rail_result.message
-
-        # 2. Classify intent
-        intent = await self._classify_intent(user_message)
-
-        # 3. Route by intent
-        if intent == Intent.FAQ and self.rag:
-            response = await self._handle_faq(user_message)
-        elif intent == Intent.TRANSACTIONAL and self.tools:
-            response = await self._handle_transaction(user_message)
-        elif intent == Intent.ESCALATION or self.failed_turns >= self.config.escalation_threshold:
-            response = await self._handle_escalation(user_message)
-        else:
-            response = await self._handle_general(user_message)
-
-        # 4. Output guardrails
-        if self.guardrails:
-            rail_result = self.guardrails.check_output(response)
-            if rail_result.action == "modify":
-                response = rail_result.modified_content
-
-        # 5. Store turn
-        self.history.append(ConversationTurn("user", user_message, intent))
-        self.history.append(ConversationTurn("assistant", response))
-
-        return response
-
-    async def _handle_faq(self, query: str) -> str:
-        """Retrieve context and generate grounded answer."""
-        chunks = self.rag.retrieve(query)
-        if not chunks:
-            self.failed_turns += 1
-            return "I don't have information on that topic. Let me connect you with support."
-        context = "\n".join(c.text for c in chunks)
-        citations = [c.metadata.get("source", "") for c in chunks]
-        prompt = (
-            f"{self.config.system_prompt}\n\n"
-            f"Context:\n{context}\n\n"
-            f"Answer the user's question. Cite sources.\n"
-            f"Question: {query}"
+    def classify(self, text: str) -> Intent:
+        resp = client.messages.parse(
+            model=self.config.router_model, max_tokens=2048,   # room for thinking
+            messages=[{"role": "user", "content": f"Classify the support intent:\n{text}"}],
+            output_format=IntentResult,
         )
-        response = await self._call_llm(prompt)
-        self.failed_turns = 0
-        return response
+        return Intent(resp.parsed_output.intent)
 
-    async def _handle_transaction(self, message: str) -> str:
-        """Execute transactional operations via tool calling."""
-        response = await self._call_llm_with_tools(
-            message, self.tools.get_schemas()
+    def respond(self, user_message: str) -> str:
+        if self.guardrails and self.guardrails.check_input(user_message).action == "block":
+            return "I can't help with that request."
+        intent = self.classify(user_message)
+        if intent is Intent.ESCALATION or self.failed_turns >= self.config.escalation_threshold:
+            self.failed_turns = 0
+            return "I'm connecting you with a human agent."
+        content = user_message
+        if intent is Intent.FAQ and self.rag:
+            chunks = self.rag.retrieve(user_message)
+            if not chunks:
+                self.failed_turns += 1
+                return "I don't have information on that topic yet."
+            sources = "\n".join(f"<source id='{i}'>{c.text}</source>" for i, c in enumerate(chunks))
+            content = f"<sources>\n{sources}\n</sources>\n\n{user_message}"
+        self.messages.append({"role": "user", "content": content})
+        resp = client.messages.create(
+            model=self.config.model, max_tokens=16000,
+            system=[{"type": "text", "text": self.config.system_prompt,
+                     "cache_control": {"type": "ephemeral"}}],          # frozen, cached prefix
+            messages=self.messages,
         )
-        return response
-
-    async def _handle_escalation(self, message: str) -> str:
-        """Hand off to human agent."""
+        self.messages.append({"role": "assistant", "content": resp.content})  # keep all blocks
+        answer = "".join(b.text for b in resp.content if b.type == "text")
+        if self.guardrails:
+            answer = self.guardrails.check_output(answer).modified_content or answer
         self.failed_turns = 0
-        return ("I'm connecting you with a human agent who can help further. "
-                "Please hold while I transfer your conversation.")
+        return answer
 ```
 
-## Session Management
+## Context Management (instead of trimming history by hand)
+
+| Need | Claude API option | Notes |
+|------|-------------------|-------|
+| Long conversations near the context limit | Compaction, beta `compact-2026-01-12`, `context_management={"edits": [{"type": "compact_20260112"}]}` on `client.beta.messages.create` | Append `response.content` (compaction blocks) every turn |
+| Old tool results bloating context | Context editing, beta `context-management-2025-06-27`, `{"type": "clear_tool_uses_20250919"}` | Clears, does not summarize |
+| Mode switch or injected state mid-session | Append `{"role": "system", "content": "..."}` to `messages` | Keeps the cached prefix; must follow a user turn |
+| Stable instructions | Frozen top-level `system` with `cache_control` | Never interpolate timestamps or user IDs into it |
+
+Keep history append-only: on current models (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5) editing or deleting earlier turns
+invalidates preserved thinking blocks and the prompt cache.
+
+## Remote MCP Tools (MCP connector)
 
 ```python
-@dataclass
-class Session:
-    session_id: str
-    user_id: str
-    history: list[ConversationTurn] = field(default_factory=list)
-    context: dict = field(default_factory=dict)
-    created_at: str = ""
-    ttl_minutes: int = 30
-
-    def trim_history(self, max_turns: int = 20):
-        """Keep system prompt + last N turns to manage context window."""
-        if len(self.history) > max_turns:
-            self.history = self.history[-max_turns:]
-
-    def to_messages(self) -> list[dict]:
-        """Convert to LLM message format."""
-        return [{"role": t.role, "content": t.content} for t in self.history]
+resp = client.beta.messages.create(
+    model="claude-sonnet-5-5", max_tokens=16000,
+    betas=["mcp-client-2025-11-20"],
+    mcp_servers=[{"type": "url", "url": "https://mcp.example.com/mcp",
+                  "name": "orders", "authorization_token": ORDERS_TOKEN}],
+    tools=[{"type": "mcp_toolset", "mcp_server_name": "orders"}],   # both halves are required
+    messages=[{"role": "user", "content": "Where is order 1234?"}],
+)
 ```
+
+The connector reaches only publicly exposed HTTP servers (Streamable HTTP or SSE); local stdio servers need a client-side
+MCP client instead. On Databricks, Genie One and Databricks SQL are available as Databricks-provided MCP servers.
 
 ## Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `max_history_turns` | `20` | Context window management |
+| `model` | `claude-sonnet-5-5` | Answer model |
+| `router_model` | `claude-haiku-5-5` | Intent classification with structured output |
 | `escalation_threshold` | `3` | Failed turns before human handoff |
-| `rag_similarity_threshold` | `0.7` | Minimum retrieval relevance |
-| `session_ttl_minutes` | `30` | Session expiration |
+| `rag_similarity_threshold` | `0.7` | Minimum retrieval relevance (tune per embedding model) |
+| `session_ttl_minutes` | `30` | Session expiration in your session store |
 
 ## See Also
 
 - [State Machines](../concepts/state-machines.md)
 - [Guardrails](../concepts/guardrails.md)
 - [RAG Pipeline](../patterns/rag-pipeline.md)
+- [Claude API Surface](../concepts/anthropic-api-surface.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+- https://platform.claude.com/docs/en/build-with-claude/compaction
+- https://platform.claude.com/docs/en/build-with-claude/context-editing
+- https://platform.claude.com/docs/en/agents-and-tools/mcp-connector
+- https://docs.databricks.com/aws/en/agents/mcp-tools/

@@ -15,7 +15,7 @@ description: |
   - user: "Set up Debezium CDC from Postgres to Kafka"
   - assistant: "Let me invoke the streaming-engineer for the CDC pipeline."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, mcp__context7__*, mcp__exa__*]
 kb_domains: [streaming, spark, sql-patterns]
 color: red
 model: sonnet
@@ -71,7 +71,7 @@ On activation, read ONLY:
 | KB pattern exact match | +0.20 |
 | MCP confirms approach | +0.15 |
 | Codebase example found | +0.10 |
-| Framework version mismatch (Flink 1.x vs 2.x) | -0.15 |
+| Framework version mismatch (Flink 1.x vs 2.x, Kafka 3.x ZooKeeper vs 4.x KRaft, Spark 3.5 vs 4.x) | -0.15 |
 | Contradictory sources | -0.10 |
 
 ---
@@ -99,6 +99,8 @@ On activation, read ONLY:
 2. Read `.claude/kb/streaming/patterns/kafka-producer-consumer.md`
 3. Design topic topology, serialization, consumer groups
 4. Include idempotent producer, DLQ, exactly-once semantics
+5. Choose the consumption model: classic consumer group (ordered per partition) vs share group (KIP-932, queue-like, per-record acknowledgement — production-ready only in Kafka 4.2+, Java `KafkaShareConsumer`; the Python `ShareConsumer` in confluent-kafka 2.15.0 is still preview; there is no `group.type` config); for consumer groups on Kafka 4.0+ brokers, opt in to the KIP-848 protocol with `group.protocol=consumer` (then `session.timeout.ms`/`heartbeat.interval.ms`/`partition.assignment.strategy` move to broker-side `group.consumer.*` settings)
+6. Kafka 4.x is KRaft-only: ZooKeeper clusters must migrate to KRaft on the 3.9 bridge release before upgrading
 
 **Output:** Kafka configuration + producer/consumer Python code
 
@@ -109,8 +111,9 @@ On activation, read ONLY:
 **Process:**
 1. Read `.claude/kb/streaming/patterns/spark-streaming-patterns.md`
 2. Design streaming job: source, transformations, sink
-3. Configure trigger mode, watermarks, checkpoint location
+3. Configure trigger mode (`processingTime`, `availableNow`, or real-time mode for sub-second latency — Databricks DBR 16.4 LTS+ on classic compute with Photon, autoscaling and spot off, update mode only, no Delta source/sink; Spark OSS 4.1+; continuous processing is legacy — see `.claude/kb/spark/concepts/real-time-mode.md`), watermarks, checkpoint location on durable storage (object storage / UC volumes)
 4. Include foreachBatch for complex sink logic
+5. For custom per-key state use `transformWithState` / `transformWithStateInPandas` (Spark 4.0+, DBR 16.2+; pattern in `.claude/kb/spark/patterns/transform-with-state.md`); escalate deep Spark-only designs to spark-streaming-architect
 
 **Output:** PySpark Structured Streaming job
 
@@ -119,9 +122,9 @@ On activation, read ONLY:
 **Trigger:** "CDC", "change data capture", "debezium", "flink cdc", "change data feed", "binlog"
 
 **Process:**
-1. Read `.claude/kb/streaming/patterns/cdc-patterns.md`
-2. Select CDC approach: Debezium, Flink CDC, Delta CDF, Iceberg incremental
-3. Design connector configuration and transformation logic
+1. Read `.claude/kb/streaming/patterns/cdc-patterns.md`; for Debezium versions, engine, Operator and signals read `.claude/kb/streaming/patterns/debezium-operations.md`; for Flink CDC YAML pipelines read `.claude/kb/streaming/patterns/flink-cdc-pipelines.md`
+2. Select CDC approach: Debezium (Kafka Connect, Debezium Server, or embedded engine), Flink CDC 3.x (YAML pipeline definitions with schema evolution, or SQL `*-cdc` connectors), Delta CDF, Iceberg incremental
+3. Design connector configuration and transformation logic (Debezium `ExtractNewRecordState` uses `delete.tombstone.handling.mode`; incremental snapshots are triggered through signals)
 4. Include exactly-once delivery guarantees
 
 **Output:** CDC connector configuration + transformation pipeline
@@ -133,7 +136,7 @@ On activation, read ONLY:
 **Process:**
 1. Read `.claude/kb/streaming/concepts/streaming-databases.md`
 2. Design materialized views for continuous aggregation
-3. Compare: RisingWave (Postgres-compat) vs Materialize (differential dataflow)
+3. Compare: RisingWave (Postgres-compatible, cloud or self-hosted) vs Materialize (differential dataflow; cloud or Self-Managed on Kubernetes)
 
 **Output:** Streaming SQL DDL with materialized views
 
@@ -204,7 +207,9 @@ PRE-FLIGHT CHECK
 | auto.offset.reset=earliest on large topic | Reprocesses entire history, backpressure | Use earliest only for new consumer groups on small topics |
 | Unbounded state in streaming joins | Memory leak, OOM | Set state TTL or use windowed joins |
 | Skip DLQ | Poison messages crash entire pipeline | Route unparseable messages to DLQ |
-| Checkpoint to local disk in production | Lost on node failure | Use S3/GCS/HDFS for checkpoints |
+| Checkpoint to local disk in production | Lost on node failure | Use S3/GCS/ADLS/HDFS (or UC volumes on Databricks) for checkpoints |
+| Use ZooKeeper-era configs on Kafka 4.x (`zookeeper.connect`, `kafka-metadata.sh` migrations) | Kafka 4.0 removed ZooKeeper | KRaft controllers; migrate on 3.9 first |
+| Use `trigger(continuous=...)` for low latency | Legacy, at-least-once | Real-time mode where available |
 
 ---
 

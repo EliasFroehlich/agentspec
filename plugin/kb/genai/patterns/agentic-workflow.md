@@ -1,100 +1,99 @@
 # Agentic Workflow Pattern
 
-> **Purpose**: Multi-step agent workflow with plan-and-execute orchestration and model tiering
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Multi-step agent workflow with plan-and-execute orchestration, structured plans, and per-role model/effort selection
+> **MCP Validated**: 2026-10-17
 
 ## When to Use
 
-- Complex tasks requiring multiple reasoning steps and tool calls
-- Tasks that benefit from decomposition into subtasks
-- Workflows where cheaper models can execute plans from frontier models
-- Scenarios needing iterative refinement with self-correction
+- Tasks that need several reasoning steps and tool calls and are hard to specify fully in advance
+- Work that decomposes into independent subtasks (fan-out) with a review step
+- Pipelines where cheaper models or lower effort can execute steps planned by a stronger model
+- Not for single extractions or classifications — use one structured-output call instead
 
 ## Architecture
 
 ```text
-                    +-------------------+
-                    |   User Request    |
-                    +--------+----------+
-                             |
-                    +--------v----------+
-                    |   Planner Agent   |  (Claude Opus 4.6 / GPT-4o)
-                    | - Decompose task  |
-                    | - Assign workers  |
-                    | - Define success  |
-                    +--------+----------+
-                             |
-              +--------------+--------------+
-              |              |              |
-     +--------v------+ +----v-------+ +----v--------+
-     | Worker Agent 1 | | Worker 2   | | Worker 3    |  (Sonnet 4.6 / Haiku)
-     | (Research)     | | (Analyze)  | | (Write)     |
-     | + MCP tools    | | + tools    | | + tools     |
-     +--------+------+ +----+-------+ +----+--------+
-              |              |              |
-              +--------------+--------------+
-                             |
-                    +--------v----------+
-                    |  Reviewer Agent   |  (frontier model)
-                    | - Check quality   |
-                    | - Request revise  |
-                    +--------+----------+
-                             |
-                    +--------v----------+
-                    |   Final Output    |
-                    +-------------------+
+User request
+   │
+Planner (claude-opus-5-5, effort high)  ── structured Plan (2–5 tasks) via messages.parse
+   │
+   ├── Worker 1 (claude-sonnet-5-5, effort medium) + tools/MCP
+   ├── Worker 2 (claude-sonnet-5-5, effort medium) + tools/MCP
+   └── Worker 3 (claude-haiku-5-5, effort low)     + tools/MCP
+   │
+Reviewer (claude-opus-5-5) ── PASS → final output | NEEDS_REVISION → re-execute (bounded)
 ```
 
-## Implementation with LangGraph
+## Implementation (LangGraph orchestration + Anthropic SDK calls)
 
 ```python
-from langgraph.graph import StateGraph, START, END
-from langchain.chat_models import init_chat_model
-from typing import TypedDict, Annotated, Any
 import operator
+from typing import Annotated, Literal, TypedDict
+
+import anthropic
+from pydantic import BaseModel
+from langgraph.graph import END, START, StateGraph
+
+client = anthropic.Anthropic()
+
+class Task(BaseModel):
+    id: str
+    description: str
+    worker: Literal["sonnet", "haiku"]
+
+class Plan(BaseModel):
+    tasks: list[Task]
+
+class Review(BaseModel):
+    verdict: Literal["PASS", "NEEDS_REVISION"]
+    feedback: str
+
+WORKERS = {"sonnet": ("claude-sonnet-5-5", "medium"), "haiku": ("claude-haiku-5-5", "low")}
 
 class WorkflowState(TypedDict):
-    messages: Annotated[list, operator.add]
-    plan: list[dict]
-    results: dict[str, Any]
-    review_passed: bool
+    request: str
+    plan: list[Task]
+    results: dict[str, str]
+    review: Review | None
+    attempts: Annotated[int, operator.add]
 
-planner = init_chat_model("claude-opus-4-6", temperature=0)
-worker = init_chat_model("claude-sonnet-4-6", temperature=0)
-reviewer = init_chat_model("claude-opus-4-6", temperature=0)
+def text_of(resp) -> str:
+    return "".join(b.text for b in resp.content if b.type == "text")   # blocks by type
 
 def plan_step(state: WorkflowState):
-    """Frontier model decomposes request into tasks."""
-    response = planner.invoke([{
-        "role": "system",
-        "content": "Decompose into 2-5 executable tasks. Return JSON array."
-    }] + state["messages"])
-    return {"plan": parse_plan(response.content)}
+    resp = client.messages.parse(
+        model="claude-opus-5-5", max_tokens=16000,
+        system="Decompose the request into 2-5 independent tasks a worker can finish alone.",
+        messages=[{"role": "user", "content": state["request"]}],
+        output_format=Plan,
+    )
+    return {"plan": resp.parsed_output.tasks}
 
 def execute_step(state: WorkflowState):
-    """Worker models execute each task with tools."""
     results = {}
+    feedback = state["review"].feedback if state["review"] else ""
     for task in state["plan"]:
-        response = worker.invoke([{
-            "role": "system",
-            "content": f"Execute: {task['description']}. Context: {results}"
-        }])
-        results[task["id"]] = response.content
-    return {"results": results}
+        model, effort = WORKERS[task.worker]
+        resp = client.messages.create(
+            model=model, max_tokens=16000, output_config={"effort": effort},
+            messages=[{"role": "user", "content": f"{task.description}\n\nReviewer notes: {feedback}"}],
+        )
+        results[task.id] = text_of(resp)
+    return {"results": results, "attempts": 1}
 
 def review_step(state: WorkflowState):
-    """Frontier model reviews all outputs."""
-    response = reviewer.invoke([{
-        "role": "system",
-        "content": "Review results. Respond PASS or NEEDS_REVISION."
-    }, {
-        "role": "user",
-        "content": f"Plan: {state['plan']}\nResults: {state['results']}"
-    }])
-    return {"review_passed": "PASS" in response.content}
+    resp = client.messages.parse(
+        model="claude-opus-5-5", max_tokens=16000,
+        system="Check each result against its task. Say what must change if anything fails.",
+        messages=[{"role": "user", "content": f"Plan: {state['plan']}\nResults: {state['results']}"}],
+        output_format=Review,
+    )
+    return {"review": resp.parsed_output}
 
 def route_review(state: WorkflowState) -> str:
-    return END if state["review_passed"] else "execute"
+    if state["review"].verdict == "PASS" or state["attempts"] >= 2:
+        return END
+    return "execute"
 
 graph = StateGraph(WorkflowState)
 graph.add_node("plan", plan_step)
@@ -107,55 +106,57 @@ graph.add_conditional_edges("review", route_review, [END, "execute"])
 workflow = graph.compile()
 ```
 
-## Model Tiering Cost Comparison
+## Cost Comparison (illustrative)
 
 ```text
-Frontier-only (Opus 4.6 everywhere):
-  10 steps x $0.015/step = $0.15 per workflow
+Assumption per step: 2,000 input + 500 output tokens (thinking counts as output), no caching.
+Prices per MTok as of 2026-10-17: Opus 5.5 $4/$20, Sonnet 5.5 $2/$10, Haiku 5.5 $0.10/$0.50.
 
-Plan-and-Execute (Opus plans, Sonnet executes):
-  2 Opus ($0.015) + 8 Sonnet ($0.003) = $0.054
-  Savings: ~64%
+Opus 5.5 step  = 2000×4/1M + 500×20/1M   = $0.018
+Sonnet 5.5 step = 2000×2/1M + 500×10/1M  = $0.009
+Haiku 5.5 step  = 2000×0.10/1M + 500×0.50/1M = $0.00045
 
-Plan-and-Execute (Opus plans, Haiku executes):
-  2 Opus ($0.015) + 8 Haiku ($0.0005) = $0.034
-  Savings: ~77%
-
-Model Pricing (per 1M tokens, input/output):
-  Claude Opus 4.6:   $15 / $75
-  Claude Sonnet 4.6:  $3 / $15
-  Claude Haiku 3.5:  $0.80 / $4
-  GPT-4o:             $2.50 / $10
-  GPT-4o-mini:        $0.15 / $0.60
+10 steps, Opus everywhere          = $0.180
+2 Opus (plan, review) + 8 Sonnet   = $0.036 + $0.072  = $0.108  (~40% less)
+2 Opus (plan, review) + 8 Haiku    = $0.036 + $0.0036 = $0.040  (~78% less)
 ```
+
+Measure before committing to a cascade: one capable model with `effort` tuned per route often matches it, keeps a single
+prompt-cache namespace (caches are per model), and is simpler. Judge cost per completed task, including retries.
+OpenAI equivalents for a mixed stack: `gpt-6-astra` ($10/$50), `gpt-6.1-sol` ($2/$10), `gpt-6-luna` ($0.10/$0.50).
 
 ## Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `planner_model` | `claude-opus-4-6` | Frontier model for planning and review |
-| `worker_model` | `claude-sonnet-4-6` | Balanced model for task execution |
-| `max_retries` | `2` | Max revision attempts per task |
-| `timeout_seconds` | `120` | Per-task execution timeout |
-| `parallel_execution` | `True` | Execute independent tasks concurrently |
+| `planner_model` | `claude-opus-5-5` | Planning and review; thinking always on, effort default `medium` |
+| `worker_model` | `claude-sonnet-5-5` | Task execution; `claude-haiku-5-5` for simple, high-volume steps |
+| `effort` | per role | `high` for planning/review, `medium`/`low` for workers |
+| `max_attempts` | `2` | Bound on review → re-execute loops |
+| `max_tokens` | `16000` | Leave room for thinking; stream for larger values |
+| `parallel_execution` | `False` | Run independent tasks concurrently (`asyncio` / LangGraph `Send`) |
 
 ## Example Usage
 
 ```python
-result = await workflow.ainvoke({
-    "messages": [{
-        "role": "user",
-        "content": "Research the top 3 competitors in the LLM observability space, "
-                   "analyze their pricing models, and write a comparison report."
-    }],
-    "plan": [],
-    "results": {},
-    "review_passed": False,
+result = workflow.invoke({
+    "request": "Compare the three most-used open-source LLM observability tools and write a short report.",
+    "plan": [], "results": {}, "review": None, "attempts": 0,
 })
+print(result["review"].verdict, list(result["results"]))
 ```
 
 ## See Also
 
 - [Multi-Agent Systems](../concepts/multi-agent-systems.md)
+- [Claude API Surface](../concepts/anthropic-api-surface.md)
 - [Tool Calling](../concepts/tool-calling.md)
 - [Evaluation Framework](../patterns/evaluation-framework.md)
+
+## Sources
+
+- https://platform.claude.com/docs/en/about-claude/pricing
+- https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+- https://platform.claude.com/docs/en/build-with-claude/effort
+- https://platform.openai.com/docs/models
+- https://docs.langchain.com/oss/python/langgraph/overview

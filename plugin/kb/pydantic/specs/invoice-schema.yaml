@@ -1,7 +1,7 @@
 schema_version: "1.0"
 domain: pydantic
 file_type: extraction-schema
-last_validated: "2026-02-17"
+last_validated: "2026-10-17"
 source: "patterns/extraction-schema.md"
 
 # Invoice Extraction Schema Specification
@@ -15,6 +15,13 @@ description: >
 model:
   name: InvoiceExtraction
   python_import: "from schemas.invoice import InvoiceExtraction"
+  pydantic_version: ">=2.10"   # 2.10.6 is preinstalled on Databricks Runtime 17.3 LTS
+  python_version: ">=3.12"     # uses PEP 695 generics, typing.Self, enum.StrEnum
+  string_normalization: >
+    Field() has no strip_whitespace argument (an unknown keyword only triggers a
+    deprecation warning and is not applied). Implement strip_whitespace below with
+    Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] or
+    model_config = ConfigDict(str_strip_whitespace=True).
 
   fields:
     invoice_number:
@@ -24,8 +31,7 @@ model:
       strip_whitespace: true
       description: "Unique invoice identifier (e.g., INV-2026-001)"
       validation:
-        - "min_length=1"
-        - "strip_whitespace=True"
+        - "StringConstraints(strip_whitespace=True, min_length=1)"
       notes: "LLMs may prefix with 'Invoice #' -- use field_validator to strip"
 
     vendor_name:
@@ -69,6 +75,7 @@ model:
 
     currency:
       type: enum
+      python_type: "enum.StrEnum (3.11+)"
       required: false
       default: "USD"
       allowed_values: ["USD", "EUR", "GBP", "BRL"]
@@ -171,10 +178,8 @@ nested_models:
 model_validators:
   - name: validate_totals
     mode: "after"
-    logic: "If subtotal is None, compute from sum of line_item totals"
-  - name: validate_dates
-    mode: "after"
-    logic: "If due_date provided, assert due_date >= issue_date"
+    returns: "Self"
+    logic: "Raise ValueError if due_date < issue_date; if subtotal is None, compute from sum of line_item totals"
 
 usage:
   prompt_generation: "Use InvoiceExtraction.model_json_schema() to generate format instructions"

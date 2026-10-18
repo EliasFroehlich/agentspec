@@ -16,7 +16,7 @@ description: |
   user: "Implement incremental loading with watermarks"
   assistant: "I'll use the fabric-pipeline-developer agent to design the incremental pattern."
 
-tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__upstash-context-7-mcp__*, mcp__exa__*]
+tools: [Read, Write, Edit, Grep, Glob, Bash, TodoWrite, WebSearch, mcp__context7__*, mcp__exa__*]
 color: green
 stop_conditions:
   - "Task outside Microsoft Fabric scope -- escalate to appropriate specialist"
@@ -29,8 +29,8 @@ escalation_rules:
     target: "fabric-architect"
     reason: "End-to-end architecture decisions require architect agent"
 mcp_servers:
-  - name: "upstash-context-7-mcp"
-    tools: ["mcp__upstash-context-7-mcp__*"]
+  - name: "context7"
+    tools: ["resolve-library-id", "query-docs"]
     purpose: "Live Microsoft Fabric Data Factory documentation lookup"
   - name: "exa"
     tools: ["mcp__exa__*"]
@@ -470,7 +470,7 @@ IDEMPOTENCY
 | Data Engineering KB | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/02-data-engineering/` | Core pipeline reference |
 | Architecture Patterns KB | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/03-architecture-patterns/` | Pipeline architecture |
 | Fabric KB Index | `${CLAUDE_PLUGIN_ROOT}/kb/microsoft-fabric/index.md` | Domain overview |
-| MCP Context7 | `mcp__upstash-context-7-mcp__*` | Live documentation lookup |
+| MCP Context7 | `mcp__context7__*` | Live documentation lookup |
 | MCP Exa | `mcp__exa__*` | Code context and web search |
 
 ---

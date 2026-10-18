@@ -1,155 +1,97 @@
 # Data Quality Expectations
 
-> Source: https://docs.databricks.com/aws/en/dlt/expectations
-> Lines: < 200
+> **Purpose**: Apply warn/drop/fail expectations to pipeline datasets in Python and SQL
+> **Confidence**: High
+> **MCP Validated**: 2026-10-17
 
-## Overview
+## When to Use
 
-**Apply quality constraints that validate data as it flows through ETL pipelines**
+- Tracking data quality without blocking ingestion (warn)
+- Removing records that break technical rules before they reach consumers (drop)
+- Stopping an update when a critical invariant is violated (fail)
 
-Expectations are quality checks that ensure data meets business rules and technical requirements before being written to target tables.
-
-## Expectation Components
-
-1. **Expectation name**: Identifier for the rule
-2. **Constraint clause**: SQL boolean expression
-3. **Action on violation**: What to do with invalid records
-
-## Violation Policies
-
-### 1. WARN (Default)
-
-Invalid records are retained, metrics are tracked
+## Implementation
 
 ```python
-@dlt.expect("valid_age", "age >= 0")
-@dlt.table()
-def customers():
-    return spark.read.table("raw_customers")
+from pyspark import pipelines as dp
+
+# WARN (default): invalid rows are written, metrics are recorded
+@dp.table
+@dp.expect("valid_age", "age >= 0")
+def customers_raw():
+    return spark.readStream.table("main.raw.customers")
+
+# DROP: invalid rows are removed before the write; drop count is logged
+@dp.table
+@dp.expect_or_drop("valid_email", "email LIKE '%@%.%'")
+def customers_clean():
+    return spark.readStream.table("customers_raw")
+
+# FAIL: the update fails and the transaction rolls back
+@dp.materialized_view
+@dp.expect_or_fail("has_customer_id", "customer_id IS NOT NULL")
+def customers_gold():
+    return spark.read.table("customers_clean")
+
+# Several decorators stack on one dataset
+@dp.table
+@dp.expect_or_drop("valid_id", "customer_id IS NOT NULL")
+@dp.expect_or_drop("valid_age", "age > 0 AND age < 150")
+@dp.expect("recent", "updated_at >= '2020-01-01'")
+def customers_checked():
+    return spark.readStream.table("customers_raw")
 ```
 
 ```sql
-CREATE OR REFRESH STREAMING TABLE customers(
-    CONSTRAINT valid_age
-    EXPECT (age >= 0)
-)
-AS SELECT * FROM raw_customers
+CREATE OR REFRESH STREAMING TABLE customers_checked (
+  CONSTRAINT valid_id   EXPECT (customer_id IS NOT NULL)  ON VIOLATION DROP ROW,
+  CONSTRAINT valid_age  EXPECT (age > 0 AND age < 150)    ON VIOLATION DROP ROW,
+  CONSTRAINT recent     EXPECT (updated_at >= '2020-01-01')
+) AS SELECT * FROM STREAM(customers_raw);
+
+CREATE OR REFRESH MATERIALIZED VIEW customers_gold (
+  CONSTRAINT has_customer_id EXPECT (customer_id IS NOT NULL) ON VIOLATION FAIL UPDATE
+) AS SELECT * FROM customers_checked;
 ```
 
-**Use Cases:** Exploratory data analysis, understanding data quality issues
+## Configuration
 
-### 2. DROP
+| Action | Python | SQL | Result |
+|--------|--------|-----|--------|
+| warn | `@dp.expect(name, expr)` | `CONSTRAINT n EXPECT (expr)` | Rows kept, metrics recorded |
+| drop | `@dp.expect_or_drop(name, expr)` | `... ON VIOLATION DROP ROW` | Rows dropped, count logged |
+| fail | `@dp.expect_or_fail(name, expr)` | `... ON VIOLATION FAIL UPDATE` | Update fails; no metrics recorded |
 
-Invalid records are dropped before data is written to the target
+Constraint expressions can use comparisons, built-in SQL functions, `CASE`, and boolean logic. They
+cannot call Python UDFs or external services, or run subqueries against other tables.
+
+## Example Usage
 
 ```python
-@dlt.expect_or_drop("valid_email", "email LIKE '%@%.%'")
-@dlt.table()
-def customers():
-    return spark.read.table("raw_customers")
-```
-
-```sql
-CREATE OR REFRESH STREAMING TABLE customers(
-    CONSTRAINT valid_email
-    EXPECT (email LIKE '%@%.%')
-    ON VIOLATION DROP ROW
-)
-AS SELECT * FROM raw_customers
-```
-
-**Use Cases:** Production pipelines, strict data quality requirements
-
-### 3. FAIL
-
-Invalid records prevent the update from succeeding
-
-```python
-@dlt.expect_or_fail("critical_field", "customer_id IS NOT NULL")
-@dlt.table()
-def customers():
-    return spark.read.table("raw_customers")
-```
-
-```sql
-CREATE OR REFRESH STREAMING TABLE customers(
-    CONSTRAINT critical_field
-    EXPECT (customer_id IS NOT NULL)
-    ON VIOLATION FAIL UPDATE
-)
-AS SELECT * FROM raw_customers
-```
-
-**Use Cases:** Critical business data, compliance requirements
-
-## Constraint Types
-
-### Simple Comparisons
-
-```python
-@dlt.expect("positive_amount", "amount > 0")
-@dlt.expect("valid_status", "status IN ('ACTIVE', 'INACTIVE', 'PENDING')")
-@dlt.expect("recent_date", "transaction_date >= '2020-01-01'")
-```
-
-### SQL Functions
-
-```python
-@dlt.expect("valid_year", "YEAR(transaction_date) >= 2020")
-@dlt.expect("valid_length", "LENGTH(customer_name) >= 3")
-@dlt.expect("uppercase_code", "country_code = UPPER(country_code)")
-```
-
-### CASE Statements
-
-```python
-@dlt.expect(
-    "conditional_validation",
-    """
+@dp.table
+@dp.expect("valid_order_status", """
     CASE
-        WHEN type = 'RETAIL' THEN amount <= 10000
-        WHEN type = 'WHOLESALE' THEN amount <= 100000
-        ELSE TRUE
+      WHEN type = 'ORDER'  THEN status IN ('PENDING', 'COMPLETED', 'CANCELLED')
+      WHEN type = 'REFUND' THEN status IN ('PENDING', 'APPROVED', 'REJECTED')
+      ELSE false
     END
-    """
-)
+""")
+@dp.expect("valid_dates", "start_date <= end_date AND end_date <= current_date()")
+def orders_checked():
+    return spark.readStream.table("main.raw.orders")
 ```
 
-### Complex Boolean Logic
+Error text for a failed update looks like
+`[EXPECTATION_VIOLATION.VERBOSITY_ALL] Flow '...' failed to meet the expectation. Violated
+expectations: '...'. Input data: '{...}'`. Fix the code or data before re-running.
 
-```python
-@dlt.expect(
-    "complex_rule",
-    "(status = 'ACTIVE' AND last_login IS NOT NULL) OR status = 'INACTIVE'"
-)
-```
+## See Also
 
-## Multiple Expectations
+- [Advanced expectations](expectations-advanced.md)
+- [Expectations model](../concepts/expectations-model.md)
+- [Python decorators](python-decorators.md)
 
-### Python: Individual Decorators
+## Sources
 
-```python
-@dlt.expect_or_drop("valid_id", "customer_id IS NOT NULL")
-@dlt.expect_or_drop("valid_email", "email LIKE '%@%.%'")
-@dlt.expect_or_drop("positive_age", "age > 0 AND age < 150")
-@dlt.table()
-def customers():
-    return spark.read.table("raw_customers")
-```
-
-### SQL: Multiple Constraints
-
-```sql
-CREATE OR REFRESH STREAMING TABLE customers(
-    CONSTRAINT valid_id EXPECT (customer_id IS NOT NULL) ON VIOLATION DROP ROW,
-    CONSTRAINT valid_email EXPECT (email LIKE '%@%.%') ON VIOLATION DROP ROW,
-    CONSTRAINT positive_age EXPECT (age > 0 AND age < 150) ON VIOLATION DROP ROW
-)
-AS SELECT * FROM raw_customers
-```
-
-## Related
-
-- [Advanced Expectations](expectations-advanced.md)
-- [CDC Patterns](cdc-apply-changes.md)
-- [Python Decorators](python-decorators.md)
+- https://docs.databricks.com/aws/en/ldp/expectations
+- https://docs.databricks.com/aws/en/ldp/developer/python-ref

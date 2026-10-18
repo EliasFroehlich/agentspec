@@ -1,31 +1,32 @@
 # Analytics Engineering
 
-> **Purpose**: Modern analytics engineering tools — Malloy, Evidence.dev, Observable Framework, code-first analytics philosophy
-> **MCP Validated**: 2026-03-26
+> **Purpose**: Code-first analytics tools: Malloy (+ Publisher), Evidence (Core + Studio), Observable Framework, and the analytics-as-code approach
+> **Confidence**: MEDIUM
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Analytics engineering is evolving beyond dbt + Looker. A new generation of code-first tools treats analytics artifacts (dashboards, reports, semantic models) as version-controlled code rather than drag-and-drop configurations.
+Code-first analytics tools treat semantic models, reports and dashboards as version-controlled code reviewed like software. This page covers three of them, checked against their official docs on 2026-10-17. Transformation frameworks (dbt, SQLMesh) are in [sqlmesh](sqlmesh.md).
 
 ## Key Concepts
 
-### Malloy — Semantic Modeling Language
+### Malloy: Semantic Modeling Language
 
-Malloy is a language for data analysis that replaces SQL for analytical queries. It separates the semantic model (relationships, measures, dimensions) from the query, making analytical logic reusable.
+Malloy separates the semantic model (sources, joins, dimensions, measures) from queries and compiles to SQL. The README lists these SQL engines: BigQuery, Snowflake, DuckDB, MotherDuck, PostgreSQL, MySQL, Trino, Presto and Databricks. The VS Code extension is the main authoring tool.
 
 ```malloy
-source: orders is duckdb.table('orders.parquet') extend {
+source: orders is duckdb.table('data/orders.parquet') extend {
+  join_one: customers is duckdb.table('data/customers.parquet')
+    on customer_id = customers.customer_id
+
   dimension: order_month is order_date.month
   measure:
     total_revenue is net_amount.sum()
     avg_order_value is net_amount.avg()
     order_count is count()
-
-  join_one: customers is duckdb.table('customers.parquet')
-    on customer_id = customers.customer_id
 }
 
--- Query the semantic model
+// Query the semantic model
 run: orders -> {
   group_by: customers.segment, order_month
   aggregate: total_revenue, order_count
@@ -33,65 +34,106 @@ run: orders -> {
 }
 ```
 
-**When to use**: Complex analytical queries with reusable dimensions/measures, replacing LookML or dbt metrics.
+**Malloy Publisher** is "the open-source semantic model server for Malloy". It serves `.malloy` models through REST and MCP APIs, so apps, BI tools and AI agents can query one governed model. It also includes a local web UI to browse models and run queries.
 
-### Evidence.dev — Code-First BI
+**When to use**: reusable dimensions/measures shared by analysts and agents, or as an alternative to a BI-tool-specific semantic layer.
 
-Evidence turns markdown + SQL into static reporting sites. No drag-and-drop, no server — just code.
+### Evidence: Reports as Markdown + SQL
 
-```markdown
+Evidence today has two products:
+
+- **Evidence Studio** (launched 2025-06-06): the hosted BI platform. It runs queries server-side on a managed engine and includes a cloud IDE with git, an AI agent, page/row-level access rules, SSO/SCIM and audit logging.
+- **Evidence Core** (announced 2026-08-26): the MIT-licensed open-source framework underneath Studio. It has a single CLI binary (`evidence init`, `evidence dev`, `evidence validate`, `evidence serve`), metrics in YAML, live queries, and self-hosting as a static site or Docker image. Direct warehouse connections use a root `connection.yaml`. `evidence init --warehouse` scaffolds one for `snowflake` or `bigquery`.
+
+Per the official migration guide, Core differs from **legacy Evidence** (Svelte components such as `<LineChart/>`, a `sources/` directory, DuckDB SQL run in the browser via WASM, a template-clone scaffold):
+
+- Components use **Markdoc** syntax.
+- SQL runs on a backend in the warehouse's native dialect (ClickHouse on Studio).
+- A project supports one data warehouse.
+- `evidence migrate` converts legacy projects.
+
+````markdown
 # Revenue Dashboard
 
-```sql revenue_by_month
-SELECT DATE_TRUNC('month', order_date) AS month,
-       SUM(net_amount) AS revenue
-FROM orders
-GROUP BY 1
-ORDER BY 1
+```sql top_segments
+select segment, sum(net_amount) as revenue
+from analytics.orders
+group by segment
+order by revenue desc
 ```
 
-<LineChart data={revenue_by_month} x=month y=revenue />
+{% line_chart data="analytics.orders" x="order_date" y="sum(net_amount)" date_grain="month" /%}
+````
 
-Revenue this month is **<Value data={revenue_by_month} column=revenue row=last />**.
-```
+**When to use**: version-controlled reports reviewed in pull requests, against a warehouse (Core) or a hosted platform (Studio). For a DuckDB-only local stack, the legacy framework was the DuckDB-friendly option. Check current connector support before choosing Core.
 
-**When to use**: Internal dashboards, data team reports, investor updates — anywhere you want version-controlled, reproducible BI.
+### Observable Framework: Static Data Apps
 
-### Observable Framework — Reactive Data Apps
+Observable Framework is a free, open-source (ISC) static site generator for data apps, dashboards and reports. Front-end code is JavaScript. **Data loaders** written in any language (Python, R, SQL via CLI tools) precompute static data snapshots at build time, so pages load instantly.
 
-Observable creates reactive notebooks and data apps with JavaScript/TypeScript. Ideal for exploratory analysis and interactive visualizations.
+**When to use**: custom interactive visualizations and public-facing data stories where you control the front end.
 
-**When to use**: Interactive data exploration, public-facing data journalism, custom visualizations beyond standard charts.
-
-### Code-First Philosophy
+### Code-First vs Traditional BI
 
 | Traditional BI | Code-First Analytics |
-|----------------|---------------------|
-| Drag-and-drop dashboards | SQL/markdown files in git |
-| Proprietary formats | Open standards (SQL, markdown, YAML) |
-| Click to deploy | CI/CD pipeline deploy |
-| Per-seat licensing | Open source or usage-based |
-| Semantic layer in BI tool | Semantic layer in code (Malloy, dbt metrics) |
+|----------------|----------------------|
+| Drag-and-drop dashboards | SQL/Markdown/model files in git |
+| Proprietary formats | Open formats (SQL, Markdown, YAML, Malloy) |
+| Click to deploy | CI/CD deploy (build, validate, publish) |
+| Semantic layer inside the BI tool | Semantic layer in code (Malloy, dbt metrics) |
 
 ## When to Use
 
-| Tool | Best For | Stack |
-|------|----------|-------|
-| **Malloy** | Reusable semantic models, replacing LookML | DuckDB, BigQuery, Postgres |
-| **Evidence.dev** | Version-controlled dashboards, static reports | Any SQL database |
-| **Observable** | Interactive exploration, custom viz | JavaScript, any data source |
-| **dbt + Looker** | Enterprise BI with governance | Cloud warehouses |
+| Tool | Best For | Runs On |
+|------|----------|---------|
+| **Malloy (+ Publisher)** | Reusable semantic models served to BI tools and agents | DuckDB, BigQuery, Snowflake, Postgres, Trino, Databricks, ... |
+| **Evidence Core / Studio** | Version-controlled reports, self-hosted or hosted | One warehouse via a direct connector (Core); managed engine (Studio) |
+| **Observable Framework** | Custom interactive visualizations, static hosting | Any data source via data loaders |
+| **Warehouse-native BI** | Governed enterprise BI | Platform-specific |
+
+## Common Mistakes
+
+### Wrong
+
+```bash
+npx degit evidence-dev/template my-report     # legacy Evidence framework scaffold
+```
+
+### Correct
+
+```bash
+curl -fsSL https://evidence.studio/install.sh | sh   # Evidence CLI (macOS/Linux)
+evidence init my-report
+cd my-report && evidence dev
+```
 
 ## Trade-offs
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| Code-first | Version control, reproducible, reviewable | Steeper learning curve for non-engineers |
-| Traditional BI | Accessible to non-technical users | Vendor lock-in, hard to version control |
-| Hybrid | Best of both worlds | More tools to maintain |
+| Code-first | Version control, review, reproducibility | Harder for non-engineers to edit |
+| Traditional BI | Accessible to business users | Harder to version and test |
+| Hybrid | Engineers own models, business users explore | More tools to operate |
 
-## See Also
+## Related
 
 - [duckdb](../concepts/duckdb.md)
 - [sqlmesh](../concepts/sqlmesh.md)
 - [local-first-analytics](../patterns/local-first-analytics.md)
+
+## Sources
+
+- https://docs.malloydata.dev/documentation/language/source
+- https://docs.malloydata.dev/documentation/language/join
+- https://docs.malloydata.dev/documentation/language/order_by
+- https://docs.malloydata.dev/documentation/language/expressions
+- https://github.com/malloydata/malloy/
+- https://evidence.dev/blog/evidence-core
+- https://evidence.dev/blog/evidence-studio
+- https://docs.evidence.dev/
+- https://docs.evidence.dev/cli
+- https://docs.evidence.dev/cli/commands
+- https://docs.evidence.dev/cli/connections
+- https://docs.evidence.dev/migration-guide
+- https://docs.evidence.dev/core-concepts/components
+- https://github.com/observablehq/framework

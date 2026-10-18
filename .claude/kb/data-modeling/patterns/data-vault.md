@@ -2,11 +2,11 @@
 
 > **Purpose**: Data Vault 2.0 — Hubs, Links, Satellites, hash keys, loading patterns, AutomateDV, lakehouse integration
 > **Confidence**: 0.92
-> **MCP Validated**: 2026-03-26
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Data Vault 2.0 separates business keys (Hubs), relationships (Links), and descriptive attributes (Satellites). It excels at integrating data from many sources with full history tracking. Hash keys enable parallel loading and deterministic joins. In 2025+, automation tools like AutomateDV (dbt package) and Coalesce have made Data Vault practical at enterprise scale by generating Hub/Link/Sat loading SQL from metadata definitions.
+Data Vault 2.0 separates business keys (Hubs), relationships (Links), and descriptive attributes (Satellites). It excels at integrating data from many sources with full history tracking. Hash keys enable parallel loading and deterministic joins (no sequence or identity column, so concurrent loaders do not conflict). Automation tools such as AutomateDV (a dbt package) generate Hub/Link/Sat loading SQL from metadata. The Data Vault Alliance also certifies a "Data Vault 2.1" practitioner curriculum (CDVP2.1); the structures below are the same.
 
 ## The Pattern
 
@@ -17,7 +17,7 @@ Data Vault 2.0 separates business keys (Hubs), relationships (Links), and descri
 
 -- Hub: Business entity identified by natural key
 CREATE TABLE hub_customer (
-    hub_customer_hk   CHAR(32) PRIMARY KEY,     -- MD5/SHA hash of customer_id
+    hub_customer_hk   CHAR(32) PRIMARY KEY,     -- MD5 hex string; binary hashes are an option (below)
     customer_id       VARCHAR(36) NOT NULL,      -- business key
     load_timestamp    TIMESTAMP NOT NULL,
     record_source     VARCHAR(100) NOT NULL       -- 'crm_system', 'web_app'
@@ -151,11 +151,13 @@ hub_customer:
 ) }}
 ```
 
+AutomateDV hashes as strings on Databricks and BigQuery by default; since **v0.11.0** `enable_native_hashes: true` (dbt `vars`) switches them to BINARY, which the AutomateDV docs strongly recommend for new projects. Keep one choice per vault — changing it later changes every key.
+
 ### Data Vault in the Lakehouse
 
 | Platform | Data Vault Support | Tooling |
 |----------|-------------------|---------|
-| Databricks | Delta Lake tables for Hubs/Links/Sats | AutomateDV + dbt |
+| Databricks | Delta tables for Hubs/Links/Sats; `CLUSTER BY (hub_hk)` or `CLUSTER BY AUTO`; PK/FK constraints are informational | AutomateDV + dbt (`enable_native_hashes`) |
 | Snowflake | Native tables, HASH function support | AutomateDV + dbt / Coalesce |
 | BigQuery | Partitioned tables, SHA256 hashing | AutomateDV + dbt |
 | Iceberg + Spark | Iceberg tables with merge support | AutomateDV + dbt-spark |
@@ -173,3 +175,10 @@ hub_customer:
 - [dimensional-modeling](../concepts/dimensional-modeling.md)
 - [star-schema](star-schema.md)
 - [scd-types](../concepts/scd-types.md)
+
+## Sources
+
+- https://automate-dv.readthedocs.io/en/latest/macros/
+- https://datavaultalliance.com/cdvp2-1/
+- https://docs.databricks.com/aws/en/tables/constraints
+- https://docs.databricks.com/aws/en/tables/clustering

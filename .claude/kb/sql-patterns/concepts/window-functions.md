@@ -2,11 +2,11 @@
 
 > **Purpose**: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, NTILE, running totals, QUALIFY — cross-dialect
 > **Confidence**: 0.95
-> **MCP Validated**: 2026-03-26 | Updated with QUALIFY support notes and Spark SQL 3.4+ QUALIFY
+> **MCP Validated**: 2026-10-17
 
 ## Overview
 
-Window functions compute values across a set of rows related to the current row without collapsing them into a single output row. They are essential for ranking, running totals, gap analysis, and deduplication. Syntax is mostly standard SQL, but `QUALIFY` (Snowflake, BigQuery, DuckDB) is a powerful shorthand not available in all dialects.
+Window functions compute values across a set of rows related to the current row without collapsing them into a single output row. They are essential for ranking, running totals, gap analysis, and deduplication. Syntax is mostly standard SQL, but `QUALIFY` is a shorthand not available everywhere: Snowflake, BigQuery, DuckDB, Databricks SQL (DBR 10.4 LTS+) and OSS Spark SQL from 4.2 support it; PostgreSQL and OSS Spark 4.0/4.1 need a subquery.
 
 ## The Concept
 
@@ -68,7 +68,7 @@ SELECT * FROM (
     FROM raw_events
 ) WHERE rn = 1
 
--- Or use QUALIFY (Snowflake/BigQuery/DuckDB — cleaner)
+-- Or use QUALIFY (Snowflake, BigQuery, DuckDB, Databricks DBR 10.4+, OSS Spark 4.2+)
 SELECT *
 FROM raw_events
 QUALIFY ROW_NUMBER() OVER (
@@ -83,9 +83,17 @@ QUALIFY ROW_NUMBER() OVER (
 | `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | All rows from start to here | Running total |
 | `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` | 3-row sliding window | Moving average |
 | `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` | Entire partition | Partition-level aggregate |
-| `RANGE BETWEEN INTERVAL '7' DAY PRECEDING AND CURRENT ROW` | Time-based window | 7-day rolling (DuckDB, Snowflake) |
+| `RANGE BETWEEN INTERVAL '7' DAY PRECEDING AND CURRENT ROW` | Time-based window | 7-day rolling (DuckDB; Snowflake GA since 2024-08 for COUNT/SUM/MIN/MAX/AVG-style functions). PySpark: `rangeBetween` over epoch seconds — see spark/patterns/window-functions.md |
 
 ## Related
 
 - [deduplication](../patterns/deduplication.md)
 - [gap-and-island](../patterns/gap-and-island.md)
+
+## Sources
+
+- https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-qualify
+- https://spark.apache.org/releases/spark-release-4-2-0.html
+- https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-window.html
+- https://docs.snowflake.com/en/release-notes/2024/other/2024-08-08-range-between-ga
+- https://docs.snowflake.com/en/sql-reference/functions-window-syntax

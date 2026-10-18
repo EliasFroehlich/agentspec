@@ -1,27 +1,23 @@
-schema_version: "1.0"
+schema_version: "1.1"
 domain: genai
 file_type: architecture_patterns
-last_validated: "2026-03-26"
-source: "MCP validated - Exa WebSearch, Context7, Anthropic Docs"
+last_validated: "2026-10-17"
+source: "Official docs (platform.claude.com, modelcontextprotocol.io, docs.databricks.com, docs.langchain.com, platform.openai.com, ai.google.dev, genai.owasp.org) and PyPI metadata, checked 2026-10-17"
 
 # GenAI Architecture Patterns Specification
-# Machine-readable reference for agent decision-making
+# Machine-readable reference for agent decision-making.
+# Versions, prices and model IDs are "as of 2026-10-17"; re-verify before relying on them.
 
 orchestration_patterns:
   sequential:
-    description: "Linear chain of agents processing in order"
+    description: "Linear chain of steps or agents processing in order"
     topology: "chain"
     complexity: "low"
     latency: "high"
     cost: "low"
     fault_tolerance: "low"
-    use_cases:
-      - "Step-by-step document processing"
-      - "Multi-stage data transformation"
-      - "Content generation pipelines"
-    frameworks:
-      - "LangChain"
-      - "LangGraph"
+    use_cases: ["Step-by-step document processing", "Multi-stage data transformation", "Content generation pipelines"]
+    frameworks: ["LangGraph", "LangChain create_agent", "plain SDK code"]
 
   concurrent:
     description: "Multiple agents process in parallel, results merged"
@@ -30,13 +26,8 @@ orchestration_patterns:
     latency: "low"
     cost: "high"
     fault_tolerance: "medium"
-    use_cases:
-      - "Parallel research across sources"
-      - "Multi-perspective analysis"
-      - "Ensemble generation"
-    frameworks:
-      - "LangGraph"
-      - "CrewAI"
+    use_cases: ["Parallel research across sources", "Multi-perspective analysis", "Per-document extraction"]
+    frameworks: ["LangGraph (Send)", "CrewAI", "Claude Managed Agents (multiagent)"]
 
   hub_and_spoke:
     description: "Central orchestrator dispatches to specialized agents"
@@ -45,14 +36,8 @@ orchestration_patterns:
     latency: "medium"
     cost: "medium"
     fault_tolerance: "medium"
-    use_cases:
-      - "Customer support routing"
-      - "Multi-intent classification"
-      - "Centralized task management"
-    frameworks:
-      - "OpenAI Agents SDK"
-      - "LangGraph"
-      - "AutoGen"
+    use_cases: ["Customer support routing", "Multi-intent classification", "Centralized task management"]
+    frameworks: ["OpenAI Agents SDK", "LangGraph", "Microsoft Agent Framework", "Claude Agent SDK (subagents)"]
 
   mesh:
     description: "Peer-to-peer agent communication without central control"
@@ -61,244 +46,129 @@ orchestration_patterns:
     latency: "medium"
     cost: "high"
     fault_tolerance: "high"
-    use_cases:
-      - "Distributed research teams"
-      - "Self-healing monitoring"
-      - "Resilient systems"
-    frameworks:
-      - "AutoGen"
-      - "CrewAI"
+    use_cases: ["Distributed research teams", "Self-healing monitoring"]
+    frameworks: ["CrewAI", "Microsoft Agent Framework"]
 
   plan_and_execute:
-    description: "Frontier model plans, cheaper models execute steps"
+    description: "Stronger model plans and reviews, cheaper models or lower effort execute steps"
     topology: "hierarchical"
     complexity: "high"
     latency: "variable"
-    cost: "low"
+    cost: "low-to-medium"
     fault_tolerance: "medium"
-    cost_reduction: "up to 90% vs frontier-for-everything"
-    use_cases:
-      - "Complex multi-step research"
-      - "Cost-optimized workflows"
-      - "Tasks with clear decomposition"
-    frameworks:
-      - "LangGraph"
-      - "OpenAI Agents SDK"
+    note: "Measure one capable model with per-route effort first; prompt caches are per model, so cascades lose cache reuse"
+    use_cases: ["Complex multi-step research", "Cost-sensitive workflows", "Tasks with clear decomposition"]
+    frameworks: ["LangGraph", "OpenAI Agents SDK", "Claude Agent SDK"]
 
 rag_variants:
-  naive_rag:
-    description: "Single retrieval step followed by generation"
-    stages: ["retrieve", "generate"]
-    complexity: "low"
-    best_for: "Simple Q&A"
-
-  advanced_rag:
-    description: "Pre/post-retrieval optimization with reranking"
-    stages: ["query_transform", "retrieve", "rerank", "generate"]
-    complexity: "medium"
-    best_for: "Production systems"
-
-  modular_rag:
-    description: "Swappable LEGO-style components"
-    stages: ["configurable"]
-    complexity: "medium"
-    best_for: "Flexible experimentation"
-
-  self_rag:
-    description: "Self-reflective retrieval with quality checks"
-    stages: ["retrieve", "evaluate_relevance", "generate", "evaluate_output"]
-    complexity: "high"
-    best_for: "High-accuracy requirements"
-
-  corrective_rag:
-    description: "Verify retrieval quality, re-retrieve if needed"
-    stages: ["retrieve", "verify", "re-retrieve_if_needed", "generate"]
-    complexity: "high"
-    best_for: "Critical applications"
-
-  graph_rag:
-    description: "Knowledge graph augmented retrieval"
-    stages: ["extract_entities", "graph_traverse", "retrieve", "generate"]
-    complexity: "high"
-    best_for: "Relational reasoning"
-
-  agentic_rag:
-    description: "Agent decides when and what to retrieve"
-    stages: ["reason", "decide_retrieval", "retrieve", "generate"]
-    complexity: "high"
-    best_for: "Complex multi-hop queries"
+  naive_rag: {description: "Single retrieval step followed by generation", stages: ["retrieve", "generate"], complexity: "low", best_for: "Simple Q&A"}
+  advanced_rag: {description: "Hybrid search, reranking, query transforms", stages: ["query_transform", "retrieve", "rerank", "generate"], complexity: "medium", best_for: "Production systems"}
+  modular_rag: {description: "Swappable components", stages: ["configurable"], complexity: "medium", best_for: "Flexible experimentation"}
+  self_rag: {description: "Self-reflective retrieval with quality checks", stages: ["retrieve", "evaluate_relevance", "generate", "evaluate_output"], complexity: "high", best_for: "High-accuracy requirements"}
+  corrective_rag: {description: "Verify retrieval quality, re-retrieve if needed", stages: ["retrieve", "verify", "re-retrieve_if_needed", "generate"], complexity: "high", best_for: "Critical applications"}
+  graph_rag: {description: "Knowledge graph augmented retrieval", stages: ["extract_entities", "graph_traverse", "retrieve", "generate"], complexity: "high", best_for: "Relational reasoning"}
+  agentic_rag: {description: "Agent decides when and what to retrieve", stages: ["reason", "decide_retrieval", "retrieve", "generate"], complexity: "high", best_for: "Complex multi-hop queries"}
 
 evaluation_metrics:
-  faithfulness:
-    description: "Fraction of claims grounded in retrieved context"
-    range: "0.0 - 1.0"
-    framework: "RAGAS"
-    production_threshold: 0.85
-
-  answer_relevancy:
-    description: "How well the answer addresses the question"
-    range: "0.0 - 1.0"
-    framework: "RAGAS"
-    production_threshold: 0.80
-
-  context_precision:
-    description: "Fraction of retrieved chunks that are relevant"
-    range: "0.0 - 1.0"
-    framework: "RAGAS"
-    production_threshold: 0.75
-
-  context_recall:
-    description: "Coverage of ground truth in retrieved context"
-    range: "0.0 - 1.0"
-    framework: "RAGAS"
-    requires_ground_truth: true
-    production_threshold: 0.75
-
-  toxicity:
-    description: "Presence of harmful or inappropriate content"
-    range: "0.0 - 1.0"
-    framework: "Langfuse"
-    production_threshold: 0.05
-    note: "Lower is better"
+  correctness: {description: "Answer matches expected facts or response", range: "judge-dependent", frameworks: ["MLflow Correctness", "RAGAS FactualCorrectness"], requires_ground_truth: true}
+  groundedness: {description: "Claims supported by retrieved context", range: "0.0 - 1.0", frameworks: ["MLflow RetrievalGroundedness", "RAGAS Faithfulness", "DeepEval FaithfulnessMetric"], production_threshold: 0.85}
+  relevance: {description: "Answer addresses the question", range: "0.0 - 1.0", frameworks: ["MLflow RelevanceToQuery", "DeepEval AnswerRelevancyMetric"], production_threshold: 0.80}
+  context_recall: {description: "Coverage of ground truth in retrieved context", range: "0.0 - 1.0", frameworks: ["RAGAS LLMContextRecall"], requires_ground_truth: true, production_threshold: 0.75}
+  safety: {description: "Harmful or inappropriate content", frameworks: ["MLflow Safety", "Llama Guard 4"], note: "Gate near 100% pass"}
 
 guardrail_types:
   input_rails:
     stage: "pre-llm"
-    latency: "50-300ms"
     types:
-      - name: "jailbreak_detection"
-        technique: "Llama Guard classifier"
-      - name: "pii_redaction"
-        technique: "Regex + NER"
-      - name: "topic_control"
-        technique: "LLM classifier"
-
+      - {name: "prompt_injection_detection", technique: "Pattern screen + meta-llama/Llama-Guard-4-12B classifier"}
+      - {name: "pii_redaction", technique: "Regex + NER, or Databricks ai_mask"}
+      - {name: "topic_control", technique: "Classifier"}
   retrieval_rails:
     stage: "mid-pipeline"
-    latency: "10-50ms"
     types:
-      - name: "relevance_filter"
-        technique: "Similarity threshold"
-      - name: "content_safety"
-        technique: "Classifier on chunks"
-
+      - {name: "acl_filtering", technique: "Per-tenant metadata filters (OWASP LLM08)"}
+      - {name: "relevance_filter", technique: "Similarity threshold / reranker score"}
+  tool_rails:
+    stage: "pre-execution"
+    types:
+      - {name: "argument_validation", technique: "Pydantic + allowlists"}
+      - {name: "approval_gate", technique: "Human confirmation for destructive actions (OWASP LLM06)"}
   output_rails:
     stage: "post-llm"
-    latency: "50-500ms"
     types:
-      - name: "factuality_check"
-        technique: "LLM-as-judge"
-      - name: "toxicity_filter"
-        technique: "Classifier"
-      - name: "format_validation"
-        technique: "JSON Schema / Pydantic"
+      - {name: "grounding_check", technique: "LLM-as-judge / RetrievalGroundedness"}
+      - {name: "format_validation", technique: "Provider structured outputs + Pydantic"}
+
+owasp_llm_top10_2025: ["LLM01 Prompt Injection", "LLM02 Sensitive Information Disclosure", "LLM03 Supply Chain", "LLM04 Data and Model Poisoning", "LLM05 Improper Output Handling", "LLM06 Excessive Agency", "LLM07 System Prompt Leakage", "LLM08 Vector and Embedding Weaknesses", "LLM09 Misinformation", "LLM10 Unbounded Consumption"]
 
 tool_calling_protocols:
-  openai:
-    format: "tools array"
-    schema: "JSON Schema"
-    parallel_calls: true
-    max_tools: 128
-    streaming: true
-
   anthropic:
-    format: "tools array"
-    schema: "JSON Schema"
+    schema_key: "input_schema"
+    strict: "strict: true on the tool definition"
     parallel_calls: true
-    max_tools: 64
-    streaming: true
-
-  google:
-    format: "tools array"
-    schema: "JSON Schema"
+    forced_tool_choice: "tool_choice any/tool returns 400 on claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5; use auto + prompt + strict, or output_config.format"
+    large_catalogs: "tool_search_tool_regex_20251119 / tool_search_tool_bm25_20251119 + defer_loading"
+    remote_mcp: "MCP connector, beta mcp-client-2025-11-20 (HTTP servers only)"
+  openai:
+    api: "Responses API"
+    schema_key: "parameters"
+    strict: "strict: true on function tools"
     parallel_calls: true
-    max_tools: 64
-    streaming: true
-
+    large_catalogs: "defer_loading on function tools + tool search"
+    remote_mcp: "tool type mcp with server_label"
   mcp:
-    format: "server-defined"
-    schema: "JSON Schema"
-    transport: "Streamable HTTP (2025 revision)"
-    discovery: "dynamic"
-    maintainer: "Anthropic (open standard)"
+    spec_revision: "2026-07-28"
+    transports: ["stdio", "Streamable HTTP"]
+    stateless: true
+    deprecated: ["Roots", "Sampling", "Logging", "HTTP+SSE transport", "OAuth Dynamic Client Registration (use Client ID Metadata Documents)"]
+    python_sdk: {package: "mcp", version: "2.3.0", server: "from mcp.server import MCPServer", client: "from mcp import Client"}
+    registry: "registry.modelcontextprotocol.io (preview)"
 
-frameworks_2026:
-  langgraph:
-    maintainer: "LangChain"
-    strength: "Graph-based state machines, durable execution, human-in-the-loop, memory"
-    language: "Python, TypeScript"
-    production_ready: true
-    mcp_support: true
+frameworks:
+  langgraph: {maintainer: "LangChain", version: "1.2.16", language: "Python, TypeScript", deployment: "LangSmith Deployment or self-hosted", mcp_support: true}
+  langchain: {maintainer: "LangChain", version: "1.4.6", agent_api: "langchain.agents.create_agent", legacy_package: "langchain-classic"}
+  claude_agent_sdk: {maintainer: "Anthropic", version: "0.2.168 (Python)", language: "Python, TypeScript", api: ["query()", "ClaudeAgentOptions", "ClaudeSDKClient", "@tool", "create_sdk_mcp_server()"], mcp_support: true}
+  openai_agents_sdk: {maintainer: "OpenAI", version: "0.24.0 (Python); @openai/agents (JS)", language: "Python, TypeScript", strengths: ["handoffs", "guardrails", "tracing", "sessions"], mcp_support: true}
+  google_adk: {maintainer: "Google", version: "2.12.0", language: "Python, TypeScript, Go, Java"}
+  pydantic_ai: {maintainer: "Pydantic", version: "2.57.0", strengths: ["typed agent loop", "durable execution (Temporal, DBOS, Prefect)"]}
+  microsoft_agent_framework: {maintainer: "Microsoft", package: "agent-framework", version: "1.22.0", language: "Python, .NET", replaces: "AutoGen (archived)"}
+  crewai: {maintainer: "CrewAI Inc", version: "1.15.28", language: "Python", mcp_support: "mcps field on Agent"}
+  agno: {maintainer: "Agno", version: "3.1.4", language: "Python"}
+  dspy: {maintainer: "Stanford NLP", version: "3.4.1", strength: "Prompt/program optimization"}
+  llamaindex: {maintainer: "LlamaIndex", version: "0.14.25", strength: "RAG-first, data connectors"}
 
-  crewai:
-    maintainer: "CrewAI Inc"
-    strength: "Role-based agent crews, rapid prototyping"
-    language: "Python"
-    production_ready: true
-    mcp_support: true
+models_as_of_2026_10_17:
+  anthropic:
+    models:
+      - {id: "claude-fable-5-1", context: "1M", price_per_mtok: "10/50", note: "most capable; thinking always on"}
+      - {id: "claude-opus-5-5", context: "1M", price_per_mtok: "4/20", note: "default; thinking always on; effort default medium"}
+      - {id: "claude-sonnet-5-5", context: "1M", price_per_mtok: "2/10"}
+      - {id: "claude-haiku-5-5", context: "1M", price_per_mtok: "0.10/0.50 (prompt <= 100K)"}
+    rejected_params: ["temperature/top_p/top_k (current models)", "assistant prefill", "thinking.budget_tokens", "forced tool_choice (Fable 5.1, Opus 5.5, Sonnet 5.5)"]
+    retired: ["claude-3-5-haiku-20241022", "claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805"]
+  openai:
+    models:
+      - {id: "gpt-6-astra", context: "1.05M", price_per_mtok: "10/50"}
+      - {id: "gpt-6.1-sol", context: "1.05M", price_per_mtok: "2/10"}
+      - {id: "gpt-6-luna", context: "1.05M", price_per_mtok: "0.1/0.5"}
+    deprecated: ["gpt-4o and gpt-4o-mini snapshots (removal 2027-01-14, replacement gpt-6-luna)"]
+  google:
+    current: ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    note: "Gemini 2.5 models are served only to prior users (no shutdown date announced; not for new projects); Gemini 2.0 Flash was shut down 2026-06-01"
 
-  claude_agent_sdk:
-    maintainer: "Anthropic"
-    strength: "Claude Code capabilities as library, security-first, MCP native"
-    language: "Python, TypeScript"
-    production_ready: true
-    mcp_support: true
-
-  openai_agents_sdk:
-    maintainer: "OpenAI"
-    strength: "Handoff-based delegation, tracing, guardrails"
-    language: "Python"
-    production_ready: true
-    replaces: "Swarm (experimental)"
-    mcp_support: true
-
-  autogen:
-    maintainer: "Microsoft"
-    strength: "Enterprise multi-agent, Semantic Kernel integration"
-    language: "Python, C#"
-    production_ready: true
-    mcp_support: true
-
-  agno:
-    maintainer: "Agno"
-    strength: "Minimal code agents, model-agnostic, fastest setup"
-    language: "Python"
-    production_ready: true
-    mcp_support: true
-
-  dspy:
-    maintainer: "Stanford NLP"
-    strength: "Automated prompt optimization, self-improving"
-    language: "Python"
-    production_ready: true
-
-  llamaindex:
-    maintainer: "LlamaIndex"
-    strength: "RAG-first, data connectors, indexing"
-    language: "Python, TypeScript"
-    production_ready: true
+databricks_layer:
+  genie_agents: "Formerly Genie Spaces; low-code NL agents over tables, metric views and documents; Chat/Agent/Management APIs"
+  genie_one_mcp: "Databricks-provided MCP server recommended for NL business questions from external agents"
+  agent_bricks: "Developer platform: Agent Bricks CLI, DurableAgentServer, Agent Runtime, Databricks Sandbox, memory/sessions on Lakebase"
+  unity_gateway: "Single control plane for models (system.ai.*), MCP servers and skills; budgets, rate limits, PII masking"
+  ai_search: "Formerly Vector Search; standard and storage-optimized endpoints; hybrid and full-text search"
+  mlflow: "Tracing (OpenTelemetry-compatible), mlflow.genai.evaluate, scorers, Prompt Registry"
+  legacy: ["Knowledge Assistant", "Supervisor Agent"]
 
 decision_matrix:
-  - use_case: "Simple Q&A over documents"
-    recommended_pattern: "naive_rag or advanced_rag"
-    recommended_framework: "LlamaIndex"
-
-  - use_case: "Multi-step research task"
-    recommended_pattern: "plan_and_execute"
-    recommended_framework: "LangGraph"
-
-  - use_case: "Customer support chatbot"
-    recommended_pattern: "hub_and_spoke + state_machine + rag"
-    recommended_framework: "LangGraph + NeMo Guardrails"
-
-  - use_case: "Data pipeline monitoring"
-    recommended_pattern: "mesh or hub_and_spoke"
-    recommended_framework: "CrewAI"
-
-  - use_case: "Content generation pipeline"
-    recommended_pattern: "sequential"
-    recommended_framework: "LangChain"
-
-  - use_case: "Complex multi-hop reasoning"
-    recommended_pattern: "agentic_rag + plan_and_execute"
-    recommended_framework: "LangGraph"
+  - {use_case: "NL questions over governed lakehouse tables", recommended_pattern: "tool call to a curated text-to-SQL agent", recommended_platform: "Databricks Genie Agents"}
+  - {use_case: "Simple Q&A over documents", recommended_pattern: "advanced_rag", recommended_platform: "Databricks AI Search or any hybrid-capable vector DB"}
+  - {use_case: "Multi-step research task", recommended_pattern: "plan_and_execute", recommended_framework: "LangGraph or Claude Agent SDK"}
+  - {use_case: "Customer support chatbot", recommended_pattern: "hub_and_spoke + state_machine + rag", recommended_framework: "LangGraph + guardrails"}
+  - {use_case: "Coding / filesystem agent", recommended_pattern: "single agent with subagents", recommended_framework: "Claude Agent SDK"}
+  - {use_case: "Custom agent deployed on Databricks", recommended_pattern: "any", recommended_platform: "Agent Bricks (Agent Runtime)"}
